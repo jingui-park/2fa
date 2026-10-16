@@ -3,6 +3,9 @@
  * 包含 OTPAuth、JSON、CSV、HTML 等标准格式导出
  */
 
+import { getStandaloneHead } from '../../standalone.js';
+import { getBackupDocumentStyles } from '../../styles/backupDocument.js';
+
 /**
  * 获取标准格式导出代码
  * @returns {string} JavaScript 代码
@@ -21,16 +24,16 @@ export function getStandardFormatsCode() {
 
       switch(format) {
         case 'txt':
-          exportAsOTPAuth(secretsData, opts);
+          await exportStandardFormatViaApi(secretsData, format, opts);
           break;
         case 'json':
-          exportAsJSON(secretsData, opts);
+          await exportStandardFormatViaApi(secretsData, format, opts);
           break;
         case 'csv':
-          exportAsCSV(secretsData, opts);
+          await exportStandardFormatViaApi(secretsData, format, opts);
           break;
         case 'html':
-          await exportAsHTML(secretsData, opts);
+          await exportStandardFormatViaApi(secretsData, format, opts);
           break;
         case 'google':
           showExportToGoogleModal();
@@ -73,40 +76,168 @@ export function getStandardFormatsCode() {
           await exportAsOTPAuth(secretsData, { formatName: format });
           break;
         default:
-          showCenterToast('❌', '不支持的导出格式');
+          showCenterToast('❌', t('transferUnsupportedExport'));
       }
     }
 
     // 导出为 OTPAuth 文本格式
+    async function exportStandardFormatLocally(sortedSecrets, format, options = {}) {
+      switch (format) {
+        case 'txt':
+          await exportAsOTPAuth(sortedSecrets, {
+            ...options,
+            formatName: 'otpauth'
+          });
+          return;
+        case 'json':
+          await exportAsJSON(sortedSecrets, options);
+          return;
+        case 'csv':
+          await exportAsCSV(sortedSecrets, options);
+          return;
+        case 'html':
+          await exportAsHTML(sortedSecrets, options);
+          return;
+        default:
+          throw new Error(t('transferUnsupportedExport'));
+      }
+    }
+
+    function shouldFallbackToLocalStandardExport(responseStatus, errorData) {
+      return responseStatus === 413 || Boolean(errorData && errorData.offline === true);
+    }
+
+    async function exportStandardFormatViaApi(sortedSecrets, format, options = {}) {
+      const fallbackToLocalExport = async (reasonMessage) => {
+        console.warn('Export API unavailable, falling back to local export:', reasonMessage);
+        showCenterToast('⚠️', reasonMessage);
+        await exportStandardFormatLocally(sortedSecrets, format, options);
+      };
+
+      try {
+        showCenterToast('INFO', t('transferPreparingExport'));
+
+        const response = await authenticatedFetch('/api/secrets/export', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            format: format,
+            language: getLanguage(),
+            filenamePrefix: options.filenamePrefix || '2FA-secrets',
+            metadata: options.metadata || {},
+            secrets: sortedSecrets
+          })
+        });
+
+        if (response.status === 202) {
+          let errorMessage = t('transferOnlineRequired');
+          try {
+            const queuedData = await response.clone().json();
+            if (queuedData && queuedData.offline) {
+              errorMessage = queuedData.message || queuedData.detail || errorMessage;
+            }
+          } catch {
+            // ignore non-JSON queued responses
+          }
+          throw new Error(errorMessage);
+        }
+
+        if (response.status !== 200) {
+          let errorMessage = t('transferExportFailed');
+          let errorData = null;
+          try {
+            errorData = await response.json();
+            errorMessage = errorData.message || errorData.error || errorMessage;
+          } catch {
+            // ignore non-JSON error responses
+          }
+
+          if (shouldFallbackToLocalStandardExport(response.status, errorData)) {
+            const fallbackMessage = response.status === 413
+              ? t('transferLargeLocalExport')
+              : t('transferOfflineLocalExport');
+            await fallbackToLocalExport(fallbackMessage);
+            return;
+          }
+
+          throw new Error(errorMessage);
+        }
+
+        const contentDisposition = response.headers.get('Content-Disposition');
+        if (!contentDisposition) {
+          throw new Error(t('transferMissingDownload'));
+        }
+
+        let filename = (options.filenamePrefix || '2FA-secrets') + '-' + format + '-' + getDateString();
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+          if (filenameMatch) {
+            filename = filenameMatch[1];
+          }
+        }
+
+        const blob = await response.blob();
+        const saved = await downloadFile(blob, filename, blob.type || response.headers.get('Content-Type') || 'application/octet-stream');
+        if (saved) {
+          const formatNames = {
+            txt: 'OTPAuth TXT',
+            json: 'JSON',
+            csv: 'CSV',
+            html: 'HTML'
+          };
+          showExportSuccess(sortedSecrets.length, formatNames[format] || format.toUpperCase());
+        }
+      } catch (error) {
+        const errorMessage = error && error.message ? error.message : t('transferExportFailed');
+        const isNetworkFailure = error && (error.name === 'TypeError' || /Failed to fetch|NetworkError/i.test(errorMessage));
+
+        if (isNetworkFailure) {
+          await fallbackToLocalExport(t('transferNetworkLocalExport'));
+          return;
+        }
+
+        console.error('Export failed:', error);
+        showCenterToast('ERR', t('transferExportFailedPrefixASCII') + errorMessage);
+      }
+    }
+
+    function buildLocalOTPAuthUrl(secret) {
+      const serviceName = String(secret.name || 'Unknown').trim() || 'Unknown';
+      const accountName = secret.account ? String(secret.account).trim() : '';
+      const type = String(secret.type || 'TOTP').toUpperCase() === 'HOTP' ? 'HOTP' : 'TOTP';
+      const label = accountName
+        ? encodeURIComponent(serviceName) + ':' + encodeURIComponent(accountName)
+        : encodeURIComponent(serviceName);
+      const params = new URLSearchParams({
+        secret: String(secret.secret || '').replace(/[\\s\\-+]/g, '').toUpperCase(),
+        digits: String(secret.digits || 6),
+        algorithm: String(secret.algorithm || 'SHA1').toUpperCase()
+      });
+
+      if (serviceName) {
+        params.set('issuer', serviceName);
+      }
+
+      if (type === 'HOTP') {
+        params.set('counter', String(secret.counter || 0));
+        return 'otpauth://hotp/' + label + '?' + params.toString();
+      }
+
+      params.set('period', String(secret.period || 30));
+      return 'otpauth://totp/' + label + '?' + params.toString();
+    }
+
     async function exportAsOTPAuth(sortedSecrets, options = {}) {
       const filenamePrefix = options.filenamePrefix || '2FA-secrets';
       const formatName = options.formatName || 'otpauth';
-      const otpauthUrls = sortedSecrets.map(secret => {
-        const serviceName = secret.name.trim();
-        const accountName = secret.account ? secret.account.trim() : '';
-
-        let label;
-        if (accountName) {
-          label = encodeURIComponent(serviceName) + ':' + encodeURIComponent(accountName);
-        } else {
-          label = encodeURIComponent(serviceName);
-        }
-
-        const params = new URLSearchParams({
-          secret: secret.secret.toUpperCase(),
-          digits: (secret.digits || 6).toString(),
-          period: (secret.period || 30).toString(),
-          algorithm: secret.algorithm || 'SHA1',
-          issuer: serviceName
-        });
-
-        return 'otpauth://totp/' + label + '?' + params.toString();
-      });
+      const otpauthUrls = sortedSecrets.map(secret => buildLocalOTPAuthUrl(secret));
 
       const content = otpauthUrls.join('\\n');
       const saved = await downloadFile(content, filenamePrefix + '-' + formatName + '-' + getDateString() + '.txt', 'text/plain;charset=utf-8');
       if (saved) {
-        showExportSuccess(sortedSecrets.length, 'OTPAuth 文本');
+        showExportSuccess(sortedSecrets.length, t('transferOTPAuthText'));
       }
     }
 
@@ -142,15 +273,15 @@ export function getStandardFormatsCode() {
       const content = JSON.stringify(exportData, null, 2);
       const saved = await downloadFile(content, filenamePrefix + '-data-' + getDateString() + '.json', 'application/json;charset=utf-8');
       if (saved) {
-        showExportSuccess(sortedSecrets.length, 'JSON 数据');
+        showExportSuccess(sortedSecrets.length, t('transferJSONData'));
       }
     }
 
     // 导出为 CSV 格式
     async function exportAsCSV(sortedSecrets, options = {}) {
       const filenamePrefix = options.filenamePrefix || '2FA-secrets';
-      const headers = ['服务名称', '账户信息', '密钥', '类型', '位数', '周期(秒)', '算法', '计数器'];
-      const csvRows = [headers.join(',')];
+      const headers = [t('transferService'), t('transferAccountInfo'), t('transferSecret'), t('transferType'), t('transferDigits'), t('transferPeriodSeconds'), t('transferAlgorithm'), t('transferCounter')];
+      const csvRows = [headers.map(escapeCSV).join(',')];
 
       sortedSecrets.forEach(secret => {
         const type = (secret.type || 'TOTP').toUpperCase();
@@ -171,7 +302,87 @@ export function getStandardFormatsCode() {
       const bom = '\\uFEFF';
       const saved = await downloadFile(bom + content, filenamePrefix + '-table-' + getDateString() + '.csv', 'text/csv;charset=utf-8');
       if (saved) {
-        showExportSuccess(sortedSecrets.length, 'CSV 表格');
+        showExportSuccess(sortedSecrets.length, t('transferCSVTable'));
+      }
+    }
+
+    async function exportAsHTML(sortedSecrets, options = {}) {
+      const filenamePrefix = options.filenamePrefix || '2FA-secrets';
+      const exportTimestamp = new Date().toISOString();
+      const normalizedSecrets = sortedSecrets.map(secret => ({
+        name: String(secret.name || 'Unknown').trim() || 'Unknown',
+        account: String(secret.account || '').trim(),
+        secret: String(secret.secret || '').replace(/[\\s\\-+]/g, '').toUpperCase(),
+        type: String(secret.type || 'TOTP').toUpperCase() === 'HOTP' ? 'HOTP' : 'TOTP',
+        digits: secret.digits || 6,
+        period: secret.period || 30,
+        algorithm: String(secret.algorithm || 'SHA1').toUpperCase(),
+        counter: secret.counter || 0
+      }));
+
+      const embeddedPayload = escapeHTML(JSON.stringify({
+        version: '1.0',
+        format: 'html',
+        timestamp: exportTimestamp,
+        reason: options.source || 'export',
+        count: normalizedSecrets.length,
+        skippedInvalidCount: 0,
+        secrets: normalizedSecrets,
+        metadata: options.metadata || {}
+      }, null, 2));
+
+      const rowsHtml = normalizedSecrets.map(secret =>
+        '        <tr>\\n' +
+        '          <td>' + escapeHTML(secret.name) + '</td>\\n' +
+        '          <td>' + escapeHTML(secret.account || '') + '</td>\\n' +
+        '          <td><code>' + escapeHTML(secret.secret) + '</code></td>\\n' +
+        '          <td>' + escapeHTML(secret.type) + '</td>\\n' +
+        '          <td>' + secret.digits + '</td>\\n' +
+        '          <td>' + secret.period + '</td>\\n' +
+        '          <td>' + escapeHTML(secret.algorithm) + '</td>\\n' +
+        '          <td>' + secret.counter + '</td>\\n' +
+        '          <td class="qr-cell qr-cell-placeholder">' + escapeHTML(t('transferQRNotEmbedded')) + '</td>\\n' +
+        '        </tr>\\n'
+      ).join('');
+
+      const htmlContent = '<!DOCTYPE html>\\n' +
+        '<html lang="' + escapeHTML(getLanguage()) + '">\\n' +
+        '<head>\\n' +
+        ${JSON.stringify(getStandaloneHead('__BACKUP_DOCUMENT_TITLE__', getBackupDocumentStyles())).replace(/</g, '\\u003c')}.replace('__BACKUP_DOCUMENT_TITLE__', escapeHTML(t('transferBackupTitle'))) +
+        '  <meta name="2fa-backup-meta" content="skippedInvalidCount=0">\\n' +
+        '</head>\\n' +
+        '<body data-skipped-invalid-count="0">\\n' +
+        '  <main class="backup-document"><header class="document-header"><h1>' + escapeHTML(t('transferBackupTitle')) + '</h1><div class="meta">\\n' +
+        '  <p>' + escapeHTML(t('transferCreatedTime')) + escapeHTML(formatI18nDate(exportTimestamp)) + '</p>\\n' +
+        '  <p>' + escapeHTML(t('transferBackupCount')) + normalizedSecrets.length + '</p>\\n' +
+        '  </div></header>\\n' +
+        '  <div class="table-scroll" role="region" aria-label="' + escapeHTML(t('transferBackupTable')) + '" tabindex="0">\\n' +
+        '  <table data-skipped-invalid-count="0">\\n' +
+        '    <thead>\\n' +
+        '      <tr>\\n' +
+        '        <th>' + escapeHTML(t('transferService')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferAccountInfo')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferSecret')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferType')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferDigits')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferPeriodSeconds')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferAlgorithm')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferCounter')) + '</th>\\n' +
+        '        <th>' + escapeHTML(t('transferQRCode')) + '</th>\\n' +
+        '      </tr>\\n' +
+        '    </thead>\\n' +
+        '    <tbody>\\n' +
+               rowsHtml +
+        '    </tbody>\\n' +
+        '  </table>\\n' +
+        '  </div></main>\\n' +
+        '  <script id="__2fa_backup_data__" type="application/json">' + embeddedPayload + '<' + '/script>\\n' +
+        '</body>\\n' +
+        '</html>';
+
+      const saved = await downloadFile(htmlContent, filenamePrefix + '-backup-' + getDateString() + '.html', 'text/html;charset=utf-8');
+      if (saved) {
+        showExportSuccess(sortedSecrets.length, 'HTML');
       }
     }
 `;

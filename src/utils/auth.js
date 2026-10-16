@@ -4,9 +4,11 @@
  */
 
 import { createErrorResponse } from './response.js';
-import { checkRateLimit, createRateLimitResponse, getClientIdentifier, RATE_LIMIT_PRESETS } from './rateLimit.js';
-import { getSecurityHeaders } from './security.js';
+import { getLanguageHeaders, localizeResponseData } from './i18n.js';
+import { checkRateLimit, scopedRateLimitKey, createRateLimitResponse, getClientIdentifier, RATE_LIMIT_PRESETS } from './rateLimit.js';
+import { getAllowedOrigin, getSecurityHeaders } from './security.js';
 import { getLogger } from './logger.js';
+import { getSettings, KV_SETTINGS_KEY, sanitizeLanguage, VALID_LANGUAGES } from './settings.js';
 import {
 	ValidationError,
 	AuthenticationError,
@@ -28,7 +30,6 @@ const COOKIE_NAME = 'auth_token';
 // KV 存储键
 const KV_USER_PASSWORD_KEY = 'user_password';
 const KV_SETUP_COMPLETED_KEY = 'setup_completed';
-const KV_SETTINGS_KEY = 'settings';
 
 /**
  * 获取 JWT 过期天数（从 KV settings 读取）
@@ -343,6 +344,48 @@ function createSetCookieHeader(token, maxAge) {
 }
 
 /**
+ * 创建清除认证 Cookie 的 Set-Cookie header 值
+ * @returns {string} Set-Cookie header 值
+ */
+function createClearCookieHeader() {
+	const cookieAttributes = [
+		`${COOKIE_NAME}=`,
+		'Max-Age=0',
+		'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+		'Path=/',
+		'HttpOnly',
+		'SameSite=Strict',
+		'Secure',
+	];
+
+	return cookieAttributes.join('; ');
+}
+
+/**
+ * 判断退出登录请求是否来自同源页面。
+ * 前端 fetch 会携带 X-Requested-With；跨站表单无法添加该头。
+ * @param {Request} request - HTTP 请求对象
+ * @returns {boolean} 是否允许处理退出登录
+ */
+function isLogoutRequestAllowed(request) {
+	if (request.headers.get('X-Requested-With') !== 'XMLHttpRequest') {
+		return false;
+	}
+
+	const origin = request.headers.get('Origin');
+	if (origin && getAllowedOrigin(request) !== origin) {
+		return false;
+	}
+
+	const fetchSite = request.headers.get('Sec-Fetch-Site');
+	if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) {
+		return false;
+	}
+
+	return true;
+}
+
+/**
  * 从请求中获取 Cookie 中的 token
  * @param {Request} request - HTTP 请求对象
  * @returns {string|null} Token 或 null
@@ -514,7 +557,7 @@ export async function handleFirstTimeSetup(request, env) {
 	try {
 		// 🛡️ Rate Limiting: 防止暴力破解
 		const clientIP = getClientIdentifier(request, 'ip');
-		const rateLimitInfo = await checkRateLimit(clientIP, env, RATE_LIMIT_PRESETS.login);
+		const rateLimitInfo = await checkRateLimit(scopedRateLimitKey('setup', clientIP), env, RATE_LIMIT_PRESETS.login);
 
 		if (!rateLimitInfo.allowed) {
 			logger.warn('首次设置速率限制超出', {
@@ -525,7 +568,7 @@ export async function handleFirstTimeSetup(request, env) {
 			return createRateLimitResponse(rateLimitInfo, request);
 		}
 
-		const { password, confirmPassword } = await request.json();
+		const { password, confirmPassword, language } = await request.json();
 
 		// 验证密码
 		if (!password || !confirmPassword) {
@@ -558,8 +601,22 @@ export async function handleFirstTimeSetup(request, env) {
 			});
 		}
 
+		if (language !== undefined && (typeof language !== 'string' || !VALID_LANGUAGES.includes(language.trim()))) {
+			throw new ValidationError('无效的语言设置', {
+				field: 'language',
+				allowedValues: VALID_LANGUAGES,
+			});
+		}
+
 		// 加密密码（内部会再次验证密码强度）
 		const passwordHash = await hashPassword(password);
+
+		// 先保存语言，确保设置写入失败时仍可重试首次设置；旧客户端不修改已有偏好。
+		if (language !== undefined) {
+			const settings = await getSettings(env, { omitUnsetLanguage: true });
+			settings.language = sanitizeLanguage(language);
+			await env.SECRETS_KV.put(KV_SETTINGS_KEY, JSON.stringify(settings));
+		}
 
 		// 存储到 KV
 		await env.SECRETS_KV.put(KV_USER_PASSWORD_KEY, passwordHash);
@@ -587,17 +644,23 @@ export async function handleFirstTimeSetup(request, env) {
 		const securityHeaders = getSecurityHeaders(request);
 
 		return new Response(
-			JSON.stringify({
-				success: true,
-				message: '密码设置成功，已自动登录',
-				expiresAt: expiryDate.toISOString(),
-				expiresIn: `${jwtExpiryDays}天`,
-			}),
+			JSON.stringify(
+				localizeResponseData(
+					{
+						success: true,
+						message: '密码设置成功，已自动登录',
+						expiresAt: expiryDate.toISOString(),
+						expiresIn: `${jwtExpiryDays}天`,
+					},
+					request,
+				),
+			),
 			{
 				status: 200,
 				headers: {
 					...securityHeaders,
 					'Content-Type': 'application/json',
+					...getLanguageHeaders(request),
 					'Set-Cookie': createSetCookieHeader(jwtToken, jwtExpiryDays * 24 * 60 * 60),
 					'X-RateLimit-Limit': rateLimitInfo.limit.toString(),
 					'X-RateLimit-Remaining': rateLimitInfo.remaining.toString(),
@@ -647,7 +710,7 @@ export async function handleLogin(request, env) {
 	try {
 		// 🛡️ Rate Limiting: 防止暴力破解
 		const clientIP = getClientIdentifier(request, 'ip');
-		const rateLimitInfo = await checkRateLimit(clientIP, env, RATE_LIMIT_PRESETS.login);
+		const rateLimitInfo = await checkRateLimit(scopedRateLimitKey('login', clientIP), env, RATE_LIMIT_PRESETS.login);
 
 		if (!rateLimitInfo.allowed) {
 			logger.warn('登录速率限制超出', {
@@ -706,18 +769,24 @@ export async function handleLogin(request, env) {
 		const securityHeaders = getSecurityHeaders(request);
 
 		return new Response(
-			JSON.stringify({
-				success: true,
-				message: '登录成功',
-				token: jwtToken, // 同时在响应 body 中返回 token（供测试和客户端使用）
-				expiresAt: expiryDate.toISOString(),
-				expiresIn: `${jwtExpiryDays}天`,
-			}),
+			JSON.stringify(
+				localizeResponseData(
+					{
+						success: true,
+						message: '登录成功',
+						token: jwtToken, // 同时在响应 body 中返回 token（供测试和客户端使用）
+						expiresAt: expiryDate.toISOString(),
+						expiresIn: `${jwtExpiryDays}天`,
+					},
+					request,
+				),
+			),
 			{
 				status: 200,
 				headers: {
 					...securityHeaders,
 					'Content-Type': 'application/json',
+					...getLanguageHeaders(request),
 					'Set-Cookie': createSetCookieHeader(jwtToken, jwtExpiryDays * 24 * 60 * 60),
 					'X-RateLimit-Limit': rateLimitInfo.limit.toString(),
 					'X-RateLimit-Remaining': rateLimitInfo.remaining.toString(),
@@ -814,18 +883,24 @@ export async function handleRefreshToken(request, env) {
 		const securityHeaders = getSecurityHeaders(request);
 
 		return new Response(
-			JSON.stringify({
-				success: true,
-				message: '令牌刷新成功',
-				token: newToken, // 同时在响应 body 中返回 token（供测试和客户端使用）
-				expiresAt: expiryDate.toISOString(),
-				expiresIn: `${jwtExpiryDays}天`,
-			}),
+			JSON.stringify(
+				localizeResponseData(
+					{
+						success: true,
+						message: '令牌刷新成功',
+						token: newToken, // 同时在响应 body 中返回 token（供测试和客户端使用）
+						expiresAt: expiryDate.toISOString(),
+						expiresIn: `${jwtExpiryDays}天`,
+					},
+					request,
+				),
+			),
 			{
 				status: 200,
 				headers: {
 					...securityHeaders, // 🔒 包含 CORS, CSP 等安全头
 					'Content-Type': 'application/json',
+					...getLanguageHeaders(request),
 					// 🍪 设置新的 HttpOnly Cookie
 					'Set-Cookie': createSetCookieHeader(newToken, jwtExpiryDays * 24 * 60 * 60),
 				},
@@ -856,6 +931,51 @@ export async function handleRefreshToken(request, env) {
 }
 
 /**
+ * 处理退出登录请求
+ * @param {Request} request - HTTP 请求对象
+ * @param {Object} env - 环境变量对象（用于限流）
+ * @returns {Response} 清除认证 Cookie 的响应
+ */
+export async function handleLogout(request, env) {
+	if (!isLogoutRequestAllowed(request)) {
+		return createErrorResponse('请求被拒绝', '退出登录请求必须来自同源页面', 403, request);
+	}
+
+	// 🛡️ Rate Limiting: 防止滥用登出端点制造日志噪音/CSRF 探测
+	// 使用 sensitive 预设（10 次/分钟）—— 正常用户登出频率远低于此
+	if (env && env.SECRETS_KV) {
+		const clientIP = getClientIdentifier(request, 'ip');
+		const rateLimitInfo = await checkRateLimit(scopedRateLimitKey('logout', clientIP), env, RATE_LIMIT_PRESETS.sensitive);
+
+		if (!rateLimitInfo.allowed) {
+			return createRateLimitResponse(rateLimitInfo, request);
+		}
+	}
+
+	return new Response(
+		JSON.stringify(
+			localizeResponseData(
+				{
+					success: true,
+					message: '已退出登录',
+				},
+				request,
+			),
+		),
+		{
+			status: 200,
+			headers: {
+				...getSecurityHeaders(request),
+				'Content-Type': 'application/json',
+				...getLanguageHeaders(request),
+				'Cache-Control': 'no-store',
+				'Set-Cookie': createClearCookieHeader(),
+			},
+		},
+	);
+}
+
+/**
  * 检查路径是否需要认证
  * @param {string} pathname - 请求路径
  * @returns {boolean} 是否需要认证
@@ -865,8 +985,10 @@ export function requiresAuth(pathname) {
 	const publicPaths = [
 		'/', // 主页（会显示登录界面）
 		'/api/login', // 登录接口
+		'/api/logout', // 退出登录接口
 		'/api/refresh-token', // Token 刷新接口（已在内部验证）
 		'/api/setup', // 首次设置接口
+		'/api/time', // 客户端 TOTP 时间校准接口
 		'/setup', // 设置页面
 		'/manifest.json', // PWA manifest
 		'/sw.js', // Service Worker
@@ -874,6 +996,8 @@ export function requiresAuth(pathname) {
 		'/icon-512.png', // PWA 图标
 		'/favicon.ico', // 网站图标
 		'/otp', // OTP 生成页面（无参数）
+		'/api/onedrive/oauth/callback',
+		'/api/gdrive/oauth/callback',
 	];
 
 	// 精确匹配公开路径

@@ -1,8 +1,95 @@
+import { getCardProgressStyles } from './progress.js';
+
 /**
  * 组件样式模块
  */
 export function getComponentStyles() {
-	return `    .secrets-list {
+	return `    .clock-warning {
+      margin: 0 0 12px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--warning-light);
+      border: 1px solid var(--warning);
+      border-left: 3px solid var(--warning-dark);
+      border-radius: var(--radius-sm);
+      color: var(--text-primary);
+      line-height: 1.45;
+    }
+
+    .clock-warning[hidden] {
+      display: none;
+    }
+
+    .clock-warning-message {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+
+    .clock-warning-icon {
+      flex: 0 0 auto;
+      font-size: 15px;
+      line-height: 1.4;
+    }
+
+    .clock-warning-text {
+      min-width: 0;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
+
+    .clock-sync-retry-button {
+      min-height: 32px;
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border: 1px solid var(--warning-dark);
+      border-radius: 4px;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: background 0.2s ease, border-color 0.2s ease;
+    }
+
+    .clock-sync-retry-button:hover {
+      background: var(--bg-hover);
+    }
+
+    .clock-sync-retry-button:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 2px;
+    }
+
+    .clock-sync-retry-button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+
+    @media (max-width: 480px) {
+      .clock-warning {
+        padding: 10px;
+        gap: 8px;
+      }
+
+      .clock-warning-message {
+        gap: 7px;
+      }
+
+      .clock-sync-retry-button {
+        min-height: 44px;
+        padding: 8px 10px;
+      }
+    }
+
+    .secrets-list,
+    .service-group-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
       gap: 10px;
@@ -10,9 +97,66 @@ export function getComponentStyles() {
       margin: 0 auto;
     }
 
+    .secrets-list.is-grouped {
+      display: block;
+    }
+
+    .service-group {
+      min-width: 0;
+    }
+
+    .service-group + .service-group {
+      margin-top: 24px;
+    }
+
+    .service-group-header {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .service-group-header::after {
+      content: '';
+      flex: 1 1 auto;
+      min-width: 18px;
+      border-top: 1px solid var(--border-primary);
+    }
+
+    .service-group-title {
+      min-width: 0;
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 15px;
+      font-weight: 600;
+      line-height: 1.3;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .service-group-count {
+      flex: 0 0 auto;
+      color: var(--text-secondary);
+      font-size: 12px;
+      line-height: 1.3;
+      white-space: nowrap;
+    }
+
+    .service-group-grid {
+      min-width: 0;
+    }
+
+    @media (max-width: 480px) {
+      .service-group + .service-group {
+        margin-top: 20px;
+      }
+    }
+
     .secret-card {
       background: var(--card-bg);
-      border-radius: var(--radius-md);
+      border-radius: var(--radius-lg);
       padding: 16px;
       padding-top: 20px;
       border: 1px solid var(--card-border);
@@ -107,6 +251,17 @@ export function getComponentStyles() {
 
     .card-menu:hover {
       background: var(--bg-hover);
+    }
+
+    /* P1.6 手机端保证 ≥44px 触控面积（iOS HIG） */
+    @media (max-width: 768px) {
+      .card-menu {
+        min-width: 44px;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
     }
 
     .menu-dots {
@@ -312,40 +467,259 @@ export function getComponentStyles() {
       text-align: right;
     }
 
+    /* TOTP 窗口切换动效：同一组 nextToken 通过流转、翻牌或聚光显现完成交接 */
+    @keyframes otp-promote-current-slide {
+      0%, 38% {
+        opacity: 0;
+        transform: translateX(12px);
+      }
+      100% {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    @keyframes otp-promote-next-settle {
+      from {
+        opacity: 0;
+        transform: translateX(6px);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    @keyframes otp-promote-flip-current {
+      0%, 28% {
+        opacity: 0;
+        transform: perspective(420px) rotateX(88deg);
+      }
+      62% {
+        opacity: 1;
+        transform: perspective(420px) rotateX(-8deg);
+      }
+      100% {
+        opacity: 1;
+        transform: perspective(420px) rotateX(0);
+      }
+    }
+
+    @keyframes otp-promote-flip-next {
+      0%, 72% {
+        opacity: 0;
+        transform: none;
+      }
+      100% {
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    @keyframes otp-promote-spotlight-current {
+      0%, 18% {
+        opacity: 0;
+        transform: scale(0.94);
+        text-shadow: none;
+      }
+      54% {
+        opacity: 1;
+        transform: scale(1.04);
+        text-shadow: 0 0 14px var(--accent-color, #2196F3);
+      }
+      100% {
+        opacity: 1;
+        transform: scale(1);
+        text-shadow: none;
+      }
+    }
+
+    @keyframes otp-promote-spotlight-next {
+      0%, 72% {
+        opacity: 0;
+        transform: none;
+      }
+      100% {
+        opacity: 1;
+        transform: none;
+      }
+    }
+
+    @keyframes otp-promote-source-flip {
+      0%, 12% {
+        opacity: 0.95;
+        transform: translate(-50%, -50%) perspective(420px) rotateX(0) scale(1);
+      }
+      48% {
+        opacity: 0.3;
+        transform: translate(-50%, -50%) perspective(420px) rotateX(-78deg) scale(1);
+      }
+      100% {
+        opacity: 0;
+        transform: translate(-50%, -50%) perspective(420px) rotateX(-90deg) scale(0.98);
+      }
+    }
+
+    @keyframes otp-promote-source-spotlight {
+      0%, 12% {
+        opacity: 0.72;
+        transform: translate(-50%, -50%) scale(1);
+        text-shadow: none;
+      }
+      30% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1.1);
+        text-shadow: 0 0 10px var(--accent-color, #2196F3);
+      }
+      52% {
+        opacity: 0.8;
+        transform: translate(-50%, -50%) scale(1.02);
+        text-shadow: 0 0 5px var(--accent-color, #2196F3);
+      }
+      72% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.96);
+        text-shadow: none;
+      }
+      100% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.96);
+        text-shadow: none;
+      }
+    }
+
+    @keyframes otp-promote-fly {
+      0% {
+        opacity: 0.78;
+        transform: translate(-50%, -50%) scale(var(--otp-fly-start-scale, 0.5));
+      }
+      68% {
+        opacity: 1;
+        transform: translate(
+          calc(-50% + var(--otp-fly-x, 0px)),
+          calc(-50% + var(--otp-fly-y, 0px))
+        ) scale(1.06);
+      }
+      100% {
+        opacity: 0;
+        transform: translate(
+          calc(-50% + var(--otp-fly-x, 0px)),
+          calc(-50% + var(--otp-fly-y, 0px))
+        ) scale(1);
+      }
+    }
+
+    .otp-promote-current {
+      animation: otp-promote-current-slide 360ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+      transition: none;
+      will-change: transform, opacity;
+    }
+
+    .otp-promote-next {
+      animation: otp-promote-next-settle 180ms ease-out both;
+      transition: none;
+      will-change: transform, opacity;
+    }
+
+    .otp-promote-flip-current {
+      animation: otp-promote-flip-current 520ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+      transform-origin: center top;
+      backface-visibility: hidden;
+      transition: none;
+      will-change: transform, opacity;
+    }
+
+    .otp-promote-flip-next {
+      animation: otp-promote-flip-next 520ms ease-out both;
+      transition: none;
+      will-change: transform, opacity;
+    }
+
+    .otp-promote-spotlight-current {
+      animation: otp-promote-spotlight-current 460ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+      transform-origin: center;
+      transition: none;
+      will-change: transform, opacity;
+    }
+
+    .otp-promote-spotlight-next {
+      animation: otp-promote-spotlight-next 460ms ease-out both;
+      transition: none;
+      will-change: opacity;
+    }
+
+    .otp-promotion-flyer {
+      position: fixed;
+      display: block;
+      z-index: 1002;
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+      margin: 0;
+      padding: 0;
+      color: var(--otp-text);
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', 'SF Pro Display', monospace;
+      font-size: 42px;
+      font-weight: 300;
+      letter-spacing: 6px;
+      line-height: 1.1;
+      text-align: left;
+      transform-origin: center;
+      opacity: 0;
+      will-change: transform, opacity;
+    }
+
+    .otp-promotion-flyer-active {
+      animation: otp-promote-fly 360ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+    }
+
+    .otp-promotion-flyer-flip {
+      animation: otp-promote-source-flip 520ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+      backface-visibility: hidden;
+    }
+
+    .otp-promotion-flyer-spotlight {
+      animation: otp-promote-source-spotlight 460ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .otp-promote-current,
+      .otp-promote-next,
+      .otp-promote-flip-current,
+      .otp-promote-flip-next,
+      .otp-promote-spotlight-current,
+      .otp-promote-spotlight-next {
+        animation: none;
+        transform: none;
+        opacity: 1;
+        will-change: auto;
+      }
+
+      .otp-promotion-flyer,
+      .otp-promotion-flyer-active,
+      .otp-promotion-flyer-flip,
+      .otp-promotion-flyer-spotlight {
+        display: none !important;
+        animation: none !important;
+      }
+    }
+
     .progress-mini {
       width: 60px;
-      height: 4px;
-      background: var(--border-primary);
-      border-radius: 2px;
+      height: var(--progress-height);
+      background: var(--progress-bg);
+      border-radius: 0;
       overflow: hidden;
     }
 
     .progress-mini-fill {
       height: 100%;
-      background: #8B5CF6;
-      border-radius: 2px;
+      background: var(--progress-fill);
+      border-radius: inherit;
       transition: width 1s ease-in-out;
     }
 
-    .progress-top {
-      width: 100%;
-      height: 1px;
-      background: var(--bg-primary);
-      border-radius: 0;
-      overflow: hidden;
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-    }
-
-    .progress-top-fill {
-      height: 100%;
-      background: var(--progress-fill);
-      border-radius: 0;
-      transition: width 1s linear, background-color 0.5s ease;
-      width: 0%;
-    }
+${getCardProgressStyles()}
 
     /* ========== 同步目标卡片 ========== */
     .dest-card {
@@ -538,6 +912,21 @@ export function getComponentStyles() {
       color: var(--footer-link-hover);
     }
 
+    .footer-button {
+      padding: 0;
+      border: 0;
+      background: none;
+      font-family: inherit;
+      line-height: inherit;
+      cursor: pointer;
+    }
+
+    .footer-button:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 4px;
+      border-radius: 2px;
+    }
+
     .github-icon {
       vertical-align: middle;
       width: 14px;
@@ -566,69 +955,26 @@ export function getComponentStyles() {
       color: var(--footer-link-hover);
     }
 
-    /* ========== PWA 安装提示按钮 ========== */
-    .pwa-install-btn-float {
-      position: fixed;
-      bottom: 24px; /* 初始位置与主题按钮相同 */
-      right: 24px;
-      width: 48px;
-      height: 48px;
-      background: var(--theme-toggle-bg);
-      border: 2px solid var(--theme-toggle-border);
-      border-radius: 50%;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
-      box-shadow: var(--shadow-md);
-      z-index: 1000;
-      opacity: 0;
-      visibility: hidden;
-      -webkit-tap-highlight-color: transparent;
-      -webkit-touch-callout: none;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      -ms-user-select: none;
-      outline: none;
-      padding: 0;
-      font-family: inherit;
+    .footer-version {
+      font-family: monospace;
+      color: var(--text-tertiary);
+      user-select: text;
     }
 
-    .pwa-install-btn-float:focus-visible {
-      outline: 2px solid var(--border-focus);
-      outline-offset: 2px;
+    .footer-update-badge {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      color: var(--footer-link);
+      background: var(--bg-secondary);
+      text-decoration: none;
+      transition: color 0.2s ease;
     }
 
-    .pwa-install-btn-float.show {
-      opacity: 1;
-      visibility: visible;
-      bottom: 72px; /* 默认在主题按钮上方48px（返回顶部不显示时）*/
-    }
-
-    .pwa-install-btn-float:hover {
-      box-shadow: var(--shadow-lg);
-      background: var(--theme-toggle-hover);
-    }
-
-    .pwa-install-btn-float:active {
-      transform: translateY(0) scale(0.98);
-    }
-
-    .pwa-install-icon {
-      font-size: 20px;
-      line-height: 1;
-      transition: transform 0.3s ease;
-    }
-
-    .pwa-install-btn-float:hover .pwa-install-icon {
-      transform: scale(1.1);
-    }
-
-    /* 当返回顶部按钮显示时，安装按钮上移 */
-    .back-to-top.show ~ .pwa-install-btn-float.show {
-      bottom: 120px !important; /* 缩小间距到48px */
+    .footer-update-badge:hover {
+      color: var(--footer-link-hover);
     }
 
     /* ========== 离线状态横幅 ========== */
@@ -663,6 +1009,46 @@ export function getComponentStyles() {
       font-weight: 600;
     }
 
+    .offline-queue {
+      margin: 0 0 16px;
+      padding: 12px 16px;
+      color: var(--text-primary);
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-md);
+      font-size: 14px;
+    }
+
+    .offline-queue[hidden], .offline-queue [hidden] { display: none; }
+    .offline-queue-header, .offline-queue-list li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+    }
+    .offline-queue-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .offline-queue .btn {
+      width: auto;
+      flex: 0 0 auto;
+      min-height: 32px;
+      margin: 0;
+      padding: 6px 10px;
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text-primary);
+      background: var(--bg-primary);
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      box-shadow: none;
+    }
+    .offline-queue .btn:hover { background: var(--bg-secondary); }
+    .offline-queue-list { list-style: none; margin: 12px 0 0; padding: 0; }
+    .offline-queue-list li { padding: 10px 0; border-top: 1px solid var(--border-primary); }
+    .offline-queue-label { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
+    .offline-queue-label time { display: block; color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+    #offlineQueueFeedback { margin: 8px 0 0; }
+
     /* 离线模式下的页面样式调整 */
     body.offline-mode {
       padding-top: 44px; /* 为离线横幅留出空间 */
@@ -672,30 +1058,10 @@ export function getComponentStyles() {
       opacity: 0.95;
     }
 
-    /* ========== PWA 元素响应式设计 ========== */
+    /* ========== 离线横幅响应式 ========== */
 
     /* 移动设备 */
     @media (max-width: 480px) {
-      .pwa-install-btn-float {
-        width: 40px;
-        height: 40px;
-        bottom: 16px;
-        right: 16px;
-      }
-
-      .pwa-install-btn-float.show {
-        bottom: 64px; /* 在主题按钮上方 */
-      }
-
-      .pwa-install-icon {
-        font-size: 18px;
-      }
-
-      /* 当返回顶部按钮显示时，安装按钮上移 */
-      .back-to-top.show ~ .pwa-install-btn-float.show {
-        bottom: 112px !important;
-      }
-
       .offline-banner {
         padding: 10px 16px;
       }
@@ -715,26 +1081,6 @@ export function getComponentStyles() {
 
     /* 超小屏幕 */
     @media (max-width: 360px) {
-      .pwa-install-btn-float {
-        width: 36px;
-        height: 36px;
-        bottom: 12px;
-        right: 12px;
-      }
-
-      .pwa-install-btn-float.show {
-        bottom: 56px; /* 在主题按钮上方 */
-      }
-
-      .pwa-install-icon {
-        font-size: 16px;
-      }
-
-      /* 当返回顶部按钮显示时，安装按钮上移 */
-      .back-to-top.show ~ .pwa-install-btn-float.show {
-        bottom: 100px !important;
-      }
-
       .offline-banner {
         padding: 8px 12px;
       }
@@ -755,36 +1101,7 @@ export function getComponentStyles() {
     /* 超宽屏幕 */
     @media (min-width: 1440px) {
       .action-menu-float {
-        right: 32px;
-      }
-
-      .theme-toggle-float {
-        right: 32px;
-        bottom: 24px; /* 默认在最底部（返回顶部不显示时）*/
-      }
-
-      /* 当返回顶部按钮显示时，主题按钮上移 */
-      .back-to-top.show ~ .theme-toggle-float {
-        bottom: 80px !important; /* 缩小间距到56px */
-      }
-
-      .back-to-top {
-        right: 32px;
-        bottom: 24px; /* 最底部 */
-      }
-
-      .pwa-install-btn-float {
-        right: 32px;
-        bottom: 24px;
-      }
-
-      .pwa-install-btn-float.show {
-        bottom: 80px; /* 默认在主题按钮上方56px（返回顶部不显示时）*/
-      }
-
-      /* 当返回顶部按钮显示时，安装按钮上移 */
-      .back-to-top.show ~ .pwa-install-btn-float.show {
-        bottom: 136px !important; /* 缩小间距到56px */
+        right: calc(32px + env(safe-area-inset-right, 0px));
       }
     }
 

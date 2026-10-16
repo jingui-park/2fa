@@ -1,3 +1,4 @@
+import { transferI18n } from '../helpers/transfer-i18n.js';
 import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
@@ -7,7 +8,9 @@ import { getImportCode } from '../../src/ui/scripts/import/index.js';
 function createImportApi() {
 	const code = getImportCode();
 
+	// eslint-disable-next-line no-new-func
 	return new Function(
+		't',
 		'crypto',
 		'TextEncoder',
 		'TextDecoder',
@@ -22,6 +25,7 @@ function createImportApi() {
 		'hideImportModal',
 		`${code}; return { parseJsonImport, parseFreeOTPBackup, decryptFreeOTPBackup, decodeImportFileContent };`,
 	)(
+		transferI18n().t,
 		globalThis.crypto,
 		TextEncoder,
 		TextDecoder,
@@ -220,6 +224,32 @@ describe('import module code generation', () => {
 		expect(otpauthUrls).toHaveLength(expectedCount);
 		expect(otpauthUrls[0]).toContain('otpauth://totp/');
 		expect(otpauthUrls[0]).toContain(expectedFragment);
+	});
+
+	it('parses legacy app JSON entries that only store issuer and exportDate fields', () => {
+		const api = createImportApi();
+		const jsonData = {
+			version: '1.0',
+			exportDate: '2026-04-16T03:30:00.000Z',
+			count: 1,
+			secrets: [
+				{
+					issuer: 'GitHub',
+					account: 'user@example.com',
+					secret: 'JBSWY3DPEHPK3PXP',
+					type: 'TOTP',
+					digits: 6,
+					period: 30,
+					algorithm: 'SHA1',
+				},
+			],
+		};
+
+		const otpauthUrls = api.parseJsonImport(jsonData);
+
+		expect(otpauthUrls).toHaveLength(1);
+		expect(otpauthUrls[0]).toContain('otpauth://totp/GitHub:user%40example.com');
+		expect(otpauthUrls[0]).toContain('issuer=GitHub');
 	});
 
 	it('parses Bitwarden JSON items with raw Base32 secrets', () => {

@@ -42,6 +42,7 @@ async function buildRelease() {
     // 生成版本信息
     const buildDate = new Date().toISOString();
     const version = packageJson.version;
+    const serviceWorkerVersion = `v${version}-${buildDate.replace(/[^\d]/g, '').slice(0, 14)}`;
 
     console.log('📦 项目信息：');
     console.log(`   名称: ${packageJson.name}`);
@@ -50,12 +51,13 @@ async function buildRelease() {
 
     // 使用 esbuild 打包
     console.log('⚙️  正在打包模块...');
-    const result = await build({
+    await build({
       entryPoints: [join(rootDir, 'src', 'worker.js')],
       bundle: true,
       format: 'esm',
       target: 'es2022',
       platform: 'neutral',
+      mainFields: ['browser', 'module', 'main'],
       outfile: outputPath,
       minify: shouldMinify,
       sourcemap: false,
@@ -77,6 +79,7 @@ async function buildRelease() {
       define: {
         'process.env.VERSION': JSON.stringify(version),
         'process.env.BUILD_DATE': JSON.stringify(buildDate),
+        'globalThis.__BUILD_SW_VERSION__': JSON.stringify(serviceWorkerVersion),
       },
       external: [],
       logLevel: 'info',
@@ -143,12 +146,14 @@ wrangler deploy worker.js
 
 ## ⚙️ 配置环境变量
 
-部署后需要配置以下环境变量：
+首次部署后需要配置以下存储和环境变量。升级已有实例时，继续使用原 Worker、\`SECRETS_KV\` 绑定和 \`ENCRYPTION_KEY\`，无需创建新库或迁移数据。
 
 ### 1. 创建 KV Namespace
 
+仅首次部署且尚无账户库时创建；已有实例直接复用原 KV。
+
 \`\`\`bash
-wrangler kv:namespace create SECRETS_KV
+wrangler kv namespace create SECRETS_KV
 \`\`\`
 
 或在 Dashboard 中：
@@ -159,7 +164,13 @@ wrangler kv:namespace create SECRETS_KV
 
 在 Worker 设置中绑定 KV：
 - Variable name: \`SECRETS_KV\`
-- KV namespace: 选择刚创建的 namespace
+- KV namespace: 首次部署选择刚创建的 namespace；升级时保留原 namespace
+
+### 2.5 同时修改的保护（Durable Object）
+
+仓库中的 \`wrangler.toml\` 还声明了 Durable Object \`SECRETS_STORE\`：读写密钥的请求都交给它依次处理，避免多台设备同时修改时互相覆盖。一键部署、Workers Builds 和 \`npm run deploy\` 会自动创建它。
+
+直接粘贴 \`worker.js\` 或不带配置执行 \`wrangler deploy worker.js\` 时不会创建这个绑定。应用照常可用，但只有同一个实例收到的请求会依次处理，多台设备同时修改时仍可能丢失其中一次修改。
 
 ### 3. 配置密钥（推荐）
 
@@ -177,18 +188,42 @@ wrangler secret put ENCRYPTION_KEY
 - Type: Secret
 - Value: [你的 32 字节 base64 密钥]
 
+### 4. 按需配置云盘 OAuth（可选）
+
+如果你准备启用 OneDrive / Google Drive 远程备份，还需要额外配置：
+
+- \`ONEDRIVE_CLIENT_ID\`
+- \`ONEDRIVE_CLIENT_SECRET\`
+- \`GOOGLE_DRIVE_CLIENT_ID\`
+- \`GOOGLE_DRIVE_CLIENT_SECRET\`
+- \`OAUTH_REDIRECT_BASE_URL\`（使用自定义域名时推荐显式配置，例如 \`https://2fa.example.com\`）
+
+完成变量配置后，再参考网盘备份配置指南：
+
+- https://github.com/wuzf/2fa/blob/main/docs/CLOUD_DRIVE_SETUP.md
+
+### 5. Service Worker 版本
+
+当前 release 构建已内嵌 Service Worker 版本回退值：
+
+- \`${serviceWorkerVersion}\`
+
+即使你直接把 \`dist/worker.js\` 粘贴到 Cloudflare Dashboard 部署，PWA 缓存版本也会随本次构建一起更新。
+
 ## 🔒 安全建议
 
 1. **必须设置加密密钥**: 使用 \`ENCRYPTION_KEY\` 保护存储的 2FA 密钥
 2. **设置访问密码**: 首次访问时会提示设置密码
 3. **使用 HTTPS**: Cloudflare Workers 默认使用 HTTPS
 4. **定期备份**: 使用应用内的备份功能定期导出数据
+5. **保留原始加密密钥**: 丢失 \`ENCRYPTION_KEY\` 后无法解密已有密钥、备份和远程同步凭据
 
 ## 📚 更多信息
 
 - [项目主页](https://github.com/wuzf/2fa)
 - [完整文档](https://github.com/wuzf/2fa/blob/main/README.md)
 - [部署指南](https://github.com/wuzf/2fa/blob/main/docs/DEPLOYMENT.md)
+- [网盘备份配置指南](https://github.com/wuzf/2fa/blob/main/docs/CLOUD_DRIVE_SETUP.md)
 
 ## 📝 版本信息
 

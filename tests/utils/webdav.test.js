@@ -12,7 +12,6 @@ import {
 	getWebDAVStatus,
 	getWebDAVConfig,
 	saveWebDAVConfig,
-	pushToWebDAV,
 	testWebDAVConnection,
 } from '../../src/utils/webdav.js';
 
@@ -24,9 +23,13 @@ class MockKV {
 
 	async get(key, type = 'text') {
 		const value = this.store.get(key);
-		if (value === undefined || value === null) return null;
+		if (value === undefined || value === null) {
+			return null;
+		}
 		if (type === 'json') {
-			if (typeof value === 'object') return value;
+			if (typeof value === 'object') {
+				return value;
+			}
 			return JSON.parse(value);
 		}
 		return value;
@@ -309,6 +312,33 @@ describe('WebDAV Utils Module (Multi-Destination)', () => {
 				// 验证 fetch URL
 				const fetchCall = globalThis.fetch.mock.calls[0];
 				expect(fetchCall[0]).toBe('https://dav.example.com/backup/backup_test.json');
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
+
+		it('应根据备份格式和加密状态设置上传 MIME', async () => {
+			await saveWebDAVSingleConfig(env, {
+				name: 'NAS1',
+				url: 'https://dav.example.com',
+				username: 'u',
+				password: 'p',
+				path: '/backup',
+			});
+
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = vi.fn().mockResolvedValue({
+				ok: true,
+				status: 201,
+				statusText: 'Created',
+			});
+
+			try {
+				await pushToAllWebDAV('backup_test.csv', 'service,secret', env);
+				await pushToAllWebDAV('backup_test.html', 'v1:encrypted-backup', env);
+
+				expect(globalThis.fetch.mock.calls[0][1].headers['Content-Type']).toBe('text/csv;charset=utf-8');
+				expect(globalThis.fetch.mock.calls[1][1].headers['Content-Type']).toBe('application/octet-stream');
 			} finally {
 				globalThis.fetch = originalFetch;
 			}

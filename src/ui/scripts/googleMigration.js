@@ -8,12 +8,15 @@
  * - Protobuf 编解码
  */
 
+import { LIMITS } from '../../utils/constants.js';
+import { getTransferMessageLocalizerCode } from './transferMessages.js';
+
 /**
  * 获取 Google 迁移相关代码
  * @returns {string} JavaScript 代码
  */
 export function getGoogleMigrationCode() {
-	return `
+	return `${getTransferMessageLocalizerCode('localizeMigrationMessage')}
     // ========== Google Authenticator 迁移模块 ==========
     // 支持 otpauth-migration:// 格式的导入导出
 
@@ -32,7 +35,7 @@ export function getGoogleMigrationCode() {
         const dataParam = url.searchParams.get('data');
 
         if (!dataParam) {
-          showScannerError('迁移二维码中缺少数据');
+          showScannerError(() => t('transferMigrationNoData'));
           return;
         }
 
@@ -48,7 +51,7 @@ export function getGoogleMigrationCode() {
         const secrets = parseGoogleMigrationPayload(bytes);
 
         if (secrets.length === 0) {
-          showScannerError('未能从迁移二维码中解析出任何密钥');
+          showScannerError(() => t('transferMigrationNoKeys'));
           return;
         }
 
@@ -57,12 +60,16 @@ export function getGoogleMigrationCode() {
         // 关闭扫描器
         hideQRScanner();
 
-        // 显示导入预览
+        // 显示导入预览。A new scan starts a new import, not a resumed one.
+        window.pendingMigrationPriorSuccessCount = 0;
+        window.pendingMigrationPriorFailCount = 0;
+        window.pendingMigrationPriorFailures = [];
+        window.pendingMigrationPriorQueuedCount = 0;
         showGoogleMigrationPreview(secrets);
 
       } catch (error) {
         console.error('解析 Google 迁移二维码失败:', error);
-        showScannerError('解析 Google 迁移二维码失败: ' + error.message);
+        showScannerError(() => t('transferMigrationParseFailed') + error.message);
       }
     }
 
@@ -400,11 +407,75 @@ export function getGoogleMigrationCode() {
     /**
      * 显示导出到 Google Authenticator 的模态框
      */
-    function showExportToGoogleModal() {
+    let currentGoogleImportResult = null;
+    let googleQRCodeRenderId = 0;
+    let googleMigrationImportInProgress = false;
+    // Counts previews opened for new selections. An import that finishes after
+    // another preview opened must leave that preview and its selection alone.
+    let googleMigrationPreviewGeneration = 0;
+    // A request that never answers would otherwise keep every later import waiting.
+    const GOOGLE_MIGRATION_IMPORT_TIMEOUT_MS = 60000;
+
+    // Replace a dialog of the same kind. One still on screen holds a scroll
+    // lock, which is released unless the replacement keeps using it.
+    function replaceGoogleMigrationModal(id, keepLock) {
+      document.querySelectorAll('#' + id).forEach(function(modal) {
+        const holdsLock = modal.dataset.closing !== 'true';
+        modal.remove();
+        if (holdsLock && !keepLock) enableBodyScroll();
+      });
+    }
+
+    function revealGoogleMigrationModal(modal) {
+      setTimeout(function() {
+        if (modal.isConnected && modal.dataset.closing !== 'true') modal.classList.add('show');
+      }, 10);
+    }
+
+    function dismissGoogleMigrationModal(id) {
+      const modal = document.getElementById(id);
+      if (!modal || modal.dataset.closing === 'true') return;
+      // The exit animation keeps display:flex until removal; treat it as closed immediately.
+      modal.dataset.closing = 'true';
+      modal.inert = true;
+      modal.classList.remove('show');
+      setTimeout(function() { modal.remove(); }, 300);
+      enableBodyScroll();
+    }
+
+    function refreshGoogleMigrationTranslations() {
+      function rerender(id, render) {
+        const modal = document.getElementById(id);
+        if (!modal || modal.dataset.closing === 'true' || !(modal.classList.contains('show') || modal.style.display === 'flex')) return;
+        const selections = Array.from(modal.querySelectorAll('input[type="checkbox"]')).map(input => [input.id, input.checked]);
+        const list = modal.querySelector('.export-secret-list, .migration-preview-list');
+        const scrollTop = list?.scrollTop || 0;
+        render();
+        selections.forEach(([inputId, checked]) => { const input = document.getElementById(inputId); if (input) input.checked = checked; });
+        const refreshedList = document.getElementById(id)?.querySelector('.export-secret-list, .migration-preview-list');
+        if (refreshedList) refreshedList.scrollTop = scrollTop;
+      }
+      rerender('exportToGoogleModal', () => showExportToGoogleModal(true));
+      rerender('migrationPreviewModal', () => showGoogleMigrationPreview(window.pendingMigrationSecrets || [], true));
+      if (currentGoogleImportResult) rerender('importResultModal', () => showImportResultModal(...currentGoogleImportResult, true));
+      if (window.exportQRCodeBatches) rerender('exportQRCodeModal', () => showExportQRCodeModal(window.exportQRCodeBatches, window.exportQRCodeCurrentPage || 0, window.exportQRCodeBatchId));
+    }
+
+    // The label the account card shows, also for older blank names. Display
+    // only: the data itself keeps the stored name.
+    function googleExportDisplayName(secret) {
+      if (typeof getSecretDisplayName === 'function') return getSecretDisplayName(secret);
+      const name = secret && typeof secret.name === 'string' ? secret.name : '';
+      return name.trim() ? name : t('transferUnnamed');
+    }
+
+    function showExportToGoogleModal(refreshOnly = false) {
       if (!secrets || secrets.length === 0) {
-        showCenterToast('⚠️', '没有可导出的密钥');
+        showCenterToast('⚠️', t('transferNoExportAlt'));
         return;
       }
+
+      if (refreshOnly) document.getElementById('exportToGoogleModal')?.remove();
 
       // 创建导出选择模态框
       const modal = document.createElement('div');
@@ -414,55 +485,48 @@ export function getGoogleMigrationCode() {
 
       const content = document.createElement('div');
       content.className = 'modal-content fab-modal-content';
-      content.style.maxHeight = '80vh';
-      content.style.overflow = 'auto';
 
       content.innerHTML =
         '<div class="modal-header">' +
-          '<h2>📤 导出到 Google Authenticator</h2>' +
-          '<button class="close-btn" onclick="closeExportToGoogleModal()">&times;</button>' +
+          '<h2>' + escapeHTML(t('transferGoogleExport')) + '</h2>' +
+          '<button class="close-btn" type="button" aria-label="' + escapeHTML(t('transferCloseDialog')) + '" onclick="closeExportToGoogleModal()">' + dialogIcon('close') + '</button>' +
         '</div>' +
         '<div class="modal-body">' +
-          '<p style="margin-bottom: 15px; color: var(--text-secondary);">选择要导出的密钥（共 <strong>' + secrets.length + '</strong> 个）</p>' +
+          '<p style="margin-bottom: 15px; color: var(--text-secondary);">' + escapeHTML(t('transferSelectExportPrefix')) + '<strong>' + secrets.length + '</strong>' + escapeHTML(t('transferCountClose')) + '</p>' +
           '<div style="margin-bottom: 15px; display: flex; gap: 10px;">' +
-            '<button class="btn btn-secondary btn-sm" onclick="selectAllExportSecrets(true)">全选</button>' +
-            '<button class="btn btn-secondary btn-sm" onclick="selectAllExportSecrets(false)">取消全选</button>' +
+            '<button class="btn btn-secondary btn-sm" onclick="selectAllExportSecrets(true)">' + escapeHTML(t('transferSelectAll')) + '</button>' +
+            '<button class="btn btn-secondary btn-sm" onclick="selectAllExportSecrets(false)">' + escapeHTML(t('transferDeselectAll')) + '</button>' +
           '</div>' +
-          '<div class="export-secret-list" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 15px;">' +
+          '<div class="export-secret-list" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border-primary); border-radius: 8px; margin-bottom: 15px;">' +
             secrets.map(function(s, i) {
-              return '<div class="export-secret-item" style="padding: 12px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 10px;">' +
+              return '<div class="export-secret-item" style="padding: 12px; border-bottom: 1px solid var(--border-primary); display: flex; align-items: center; gap: 10px;">' +
                 '<input type="checkbox" id="export-' + i + '" checked style="width: 18px; height: 18px;">' +
                 '<div style="flex: 1; min-width: 0;">' +
-                  '<div style="font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + (s.name || '未知服务') + '</div>' +
-                  '<div style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + (s.account || '') + '</div>' +
+                  '<div style="font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + escapeHTML(googleExportDisplayName(s)) + '</div>' +
+                  '<div style="font-size: var(--dialog-caption-size); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + escapeHTML(s.account || '') + '</div>' +
                 '</div>' +
-                '<span style="font-size: 11px; padding: 2px 6px; background: var(--bg-tertiary); border-radius: 4px; color: var(--text-tertiary);">' + (s.type || 'TOTP') + '</span>' +
+                '<span style="font-size: var(--dialog-caption-size); padding: 2px 6px; background: var(--bg-tertiary); border-radius: 4px; color: var(--text-tertiary);">' + escapeHTML(s.type || 'TOTP') + '</span>' +
               '</div>';
             }).join('') +
           '</div>' +
           '<div style="display: flex; gap: 10px;">' +
-            '<button class="btn btn-secondary" style="flex: 1;" onclick="closeExportToGoogleModal()">取消</button>' +
-            '<button class="btn btn-primary" style="flex: 1;" onclick="generateExportQRCodes()">生成二维码</button>' +
+            '<button class="btn btn-secondary" style="flex: 1;" onclick="closeExportToGoogleModal()">' + escapeHTML(t('cancel')) + '</button>' +
+            '<button class="btn btn-primary" style="flex: 1;" onclick="generateExportQRCodes()">' + escapeHTML(t('transferGenerateQR')) + '</button>' +
           '</div>' +
         '</div>';
 
       modal.appendChild(content);
       document.body.appendChild(modal);
 
-      setTimeout(function() { modal.classList.add('show'); }, 10);
-      disableBodyScroll();
+      revealGoogleMigrationModal(modal);
+      if (!refreshOnly) disableBodyScroll();
     }
 
     /**
      * 关闭导出到 Google 模态框
      */
     function closeExportToGoogleModal() {
-      const modal = document.getElementById('exportToGoogleModal');
-      if (modal) {
-        modal.classList.remove('show');
-        setTimeout(function() { modal.remove(); }, 300);
-      }
-      enableBodyScroll();
+      dismissGoogleMigrationModal('exportToGoogleModal');
     }
 
     /**
@@ -486,7 +550,7 @@ export function getGoogleMigrationCode() {
       });
 
       if (selectedSecrets.length === 0) {
-        showCenterToast('⚠️', '请至少选择一个密钥');
+        showCenterToast('⚠️', t('transferSelectKey'));
         return;
       }
 
@@ -514,6 +578,7 @@ export function getGoogleMigrationCode() {
      * @param {number} batchId - 批次ID (所有二维码使用相同ID)
      */
     async function showExportQRCodeModal(batches, currentPage, batchId) {
+      const renderId = ++googleQRCodeRenderId;
       const totalPages = batches.length;
       const currentBatch = batches[currentPage];
 
@@ -525,8 +590,13 @@ export function getGoogleMigrationCode() {
       };
       const migrationURL = generateGoogleMigrationURL(currentBatch, batchInfo);
 
-      // 创建或更新模态框
+      // 创建或更新模态框（翻页时复用同一个 modal，避免重复锁定 body scroll）
       let modal = document.getElementById('exportQRCodeModal');
+      if (modal?.dataset.closing === 'true') {
+        modal.remove();
+        modal = null;
+      }
+      const wasAlreadyOpen = !!modal && (modal.classList.contains('show') || modal.style.display === 'flex');
       if (!modal) {
         modal = document.createElement('div');
         modal.id = 'exportQRCodeModal';
@@ -540,49 +610,55 @@ export function getGoogleMigrationCode() {
       const totalSecrets = batches.reduce(function(sum, b) { return sum + b.length; }, 0);
 
       modal.innerHTML =
-        '<div class="modal-content fab-modal-sm-content" style="text-align: center;">' +
+        '<div class="modal-content fab-modal-sm-content">' +
           '<div class="modal-header">' +
-            '<h2>📱 扫描导入到 Google Authenticator</h2>' +
-            '<button class="close-btn" onclick="closeExportQRCodeModal()">&times;</button>' +
+            '<h2>' + escapeHTML(t('transferGoogleScan')) + '</h2>' +
+            '<button class="close-btn" type="button" aria-label="' + escapeHTML(t('transferCloseDialog')) + '" onclick="closeExportQRCodeModal()">' + dialogIcon('close') + '</button>' +
           '</div>' +
           '<div class="modal-body">' +
             (totalPages > 1 ?
-              '<p style="margin-bottom: 10px; color: var(--text-secondary);">第 ' + (currentPage + 1) + '/' + totalPages + ' 个二维码（密钥 ' + startIndex + '-' + endIndex + '/' + totalSecrets + '）</p>' :
-              '<p style="margin-bottom: 10px; color: var(--text-secondary);">共 ' + totalSecrets + ' 个密钥</p>'
+              '<p style="margin-bottom: 10px; color: var(--text-secondary);">' + escapeHTML(t('transferQRPage', { page: currentPage + 1, pages: totalPages, start: startIndex, end: endIndex, total: totalSecrets })) + '</p>' :
+              '<p style="margin-bottom: 10px; color: var(--text-secondary);">' + escapeHTML(t('transferTotalPrefix')) + totalSecrets + escapeHTML(t('transferKeysSuffix')) + '</p>'
             ) +
             '<div class="qr-code-container" style="display: flex; justify-content: center; align-items: center; min-height: 250px; background: white; border-radius: 12px; padding: 20px; margin-bottom: 15px;">' +
-              '<div style="color: #666;">🔄 生成中...</div>' +
+              '<div style="color: #666;">' + escapeHTML(t('transferGenerating')) + '</div>' +
             '</div>' +
-            '<div style="margin-bottom: 15px; font-size: 12px; color: var(--text-tertiary);">' +
-              '用 Google Authenticator 扫描此二维码' +
-              (totalPages > 1 ? '<br>（需要依次扫描所有 ' + totalPages + ' 个二维码）' : '') +
+            '<div style="margin-bottom: 15px; font-size: var(--dialog-caption-size); color: var(--text-tertiary);">' +
+              t('transferGoogleScanHint') +
+              (totalPages > 1 ? '<br>' + escapeHTML(t('transferScanAll', { count: totalPages })) : '') +
             '</div>' +
             (totalPages > 1 ?
               '<div style="display: flex; gap: 10px; margin-bottom: 15px;">' +
-                '<button class="btn btn-secondary" style="flex: 1;" onclick="showExportQRCodePage(' + (currentPage - 1) + ')" ' + (currentPage === 0 ? 'disabled' : '') + '>上一个</button>' +
-                '<button class="btn btn-secondary" style="flex: 1;" onclick="showExportQRCodePage(' + (currentPage + 1) + ')" ' + (currentPage === totalPages - 1 ? 'disabled' : '') + '>下一个</button>' +
+                '<button class="btn btn-secondary" style="flex: 1;" onclick="showExportQRCodePage(' + (currentPage - 1) + ')" ' + (currentPage === 0 ? 'disabled' : '') + '>' + escapeHTML(t('transferPrevious')) + '</button>' +
+                '<button class="btn btn-secondary" style="flex: 1;" onclick="showExportQRCodePage(' + (currentPage + 1) + ')" ' + (currentPage === totalPages - 1 ? 'disabled' : '') + '>' + escapeHTML(t('transferNext')) + '</button>' +
               '</div>' : ''
             ) +
-            '<button class="btn btn-primary" style="width: 100%;" onclick="closeExportQRCodeModal()">完成</button>' +
+            '<button class="btn btn-primary" style="width: 100%;" onclick="closeExportQRCodeModal()">' + escapeHTML(t('completed')) + '</button>' +
           '</div>' +
         '</div>';
 
       // 保存批次数据和batchId供翻页使用
       window.exportQRCodeBatches = batches;
+      window.exportQRCodeCurrentPage = currentPage;
       window.exportQRCodeBatchId = batchId;
 
-      setTimeout(function() { modal.classList.add('show'); }, 10);
-      disableBodyScroll();
+      revealGoogleMigrationModal(modal);
+      // 仅首次打开时锁 body scroll；翻页复用同一 modal 不再重复加锁
+      if (!wasAlreadyOpen) {
+        disableBodyScroll();
+      }
 
       // 生成二维码
       try {
         const qrDataURL = await generateQRCodeDataURL(migrationURL, { width: 250, height: 250 });
+        if (renderId !== googleQRCodeRenderId || document.getElementById('exportQRCodeModal') !== modal) return;
         const container = modal.querySelector('.qr-code-container');
-        container.innerHTML = '<img src="' + qrDataURL + '" alt="Migration QR Code" style="width: 250px; height: 250px; border-radius: 8px;">';
+        container.innerHTML = '<img src="' + qrDataURL + '" alt="' + escapeHTML(t('transferMigrationQRAlt')) + '" style="width: 250px; height: 250px; border-radius: 8px;">';
       } catch (error) {
+        if (renderId !== googleQRCodeRenderId || document.getElementById('exportQRCodeModal') !== modal) return;
         console.error('生成二维码失败:', error);
         const container = modal.querySelector('.qr-code-container');
-        container.innerHTML = '<div style="color: #e74c3c;">❌ 生成失败: ' + error.message + '</div>';
+        container.innerHTML = '<div style="color: #e74c3c;">' + escapeHTML(t('transferGenerationFailed') + localizeMigrationMessage(error.message)) + '</div>';
       }
     }
 
@@ -599,14 +675,10 @@ export function getGoogleMigrationCode() {
      * 关闭导出二维码模态框
      */
     function closeExportQRCodeModal() {
-      const modal = document.getElementById('exportQRCodeModal');
-      if (modal) {
-        modal.classList.remove('show');
-        setTimeout(function() { modal.remove(); }, 300);
-      }
+      googleQRCodeRenderId += 1;
+      dismissGoogleMigrationModal('exportQRCodeModal');
       window.exportQRCodeBatches = null;
       window.exportQRCodeBatchId = null;
-      enableBodyScroll();
     }
 
     // ==================== 导入 UI ====================
@@ -614,7 +686,34 @@ export function getGoogleMigrationCode() {
     /**
      * 显示 Google 迁移导入预览
      */
-    function showGoogleMigrationPreview(parsedSecrets) {
+    // The service name saved for an entry. The server trims names and rejects
+    // blank ones, so a blank issuer falls back to the account label like a
+    // text import does.
+    function googleMigrationEntryNames(secret) {
+      let serviceName = String(secret.issuer || '').trim();
+      let accountName = String(secret.name || '').trim();
+
+      if (!serviceName && accountName.includes(':')) {
+        const parts = accountName.split(':');
+        serviceName = parts[0].trim();
+        accountName = parts.slice(1).join(':').trim();
+      }
+
+      return { serviceName: serviceName || accountName, accountName };
+    }
+
+    // The service name an entry is saved with. The preview shows the same one,
+    // so an entry without issuer and name is not previewed as another label.
+    function googleMigrationSavedServiceName(secret) {
+      return googleMigrationEntryNames(secret).serviceName || t('transferImportedKey');
+    }
+
+    function showGoogleMigrationPreview(parsedSecrets, refreshOnly = false) {
+      // 幂等：若上一次 closeMigrationPreview 的 300ms 延迟移除还没触发，
+      // 先立即移除旧 modal，避免新旧两个同 id modal 在 DOM 中短暂共存
+      replaceGoogleMigrationModal('migrationPreviewModal', refreshOnly);
+      if (!refreshOnly) googleMigrationPreviewGeneration += 1;
+
       // 创建预览模态框
       const modal = document.createElement('div');
       modal.id = 'migrationPreviewModal';
@@ -623,31 +722,29 @@ export function getGoogleMigrationCode() {
 
       const content = document.createElement('div');
       content.className = 'modal-content fab-modal-content';
-      content.style.maxHeight = '80vh';
-      content.style.overflow = 'auto';
 
       content.innerHTML =
         '<div class="modal-header">' +
-          '<h2>📱 Google Authenticator 导入</h2>' +
-          '<button class="close-btn" onclick="closeMigrationPreview()">&times;</button>' +
+          '<h2>' + escapeHTML(t('transferGoogleImport')) + '</h2>' +
+          '<button class="close-btn" type="button" aria-label="' + escapeHTML(t('transferCloseDialog')) + '" onclick="closeMigrationPreview()">' + dialogIcon('close') + '</button>' +
         '</div>' +
         '<div class="modal-body">' +
-          '<p style="margin-bottom: 15px; color: var(--text-secondary);">检测到 <strong>' + parsedSecrets.length + '</strong> 个密钥，确认导入？</p>' +
-          '<div class="migration-preview-list" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 15px;">' +
+          '<p style="margin-bottom: 15px; color: var(--text-secondary);">' + escapeHTML(t('transferMigrationConfirm', { count: parsedSecrets.length })) + '</p>' +
+          '<div class="migration-preview-list" style="max-height: 300px; overflow-y: auto; border: 1px solid var(--border-primary); border-radius: 8px; margin-bottom: 15px;">' +
             parsedSecrets.map(function(s, i) {
-              return '<div class="migration-preview-item" style="padding: 12px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 10px;">' +
+              return '<div class="migration-preview-item" style="padding: 12px; border-bottom: 1px solid var(--border-primary); display: flex; align-items: center; gap: 10px;">' +
                 '<input type="checkbox" id="migrate-' + i + '" checked style="width: 18px; height: 18px;">' +
                 '<div style="flex: 1; min-width: 0;">' +
-                  '<div style="font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + (s.issuer || s.name || '未知服务') + '</div>' +
-                  '<div style="font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + (s.name || '') + '</div>' +
+                  '<div style="font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + escapeHTML(googleMigrationSavedServiceName(s)) + '</div>' +
+                  '<div style="font-size: var(--dialog-caption-size); color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">' + escapeHTML(s.name || '') + '</div>' +
                 '</div>' +
-                '<span style="font-size: 11px; padding: 2px 6px; background: var(--bg-tertiary); border-radius: 4px; color: var(--text-tertiary);">' + s.type + '</span>' +
+                '<span style="font-size: var(--dialog-caption-size); padding: 2px 6px; background: var(--bg-tertiary); border-radius: 4px; color: var(--text-tertiary);">' + escapeHTML(s.type || 'TOTP') + '</span>' +
               '</div>';
             }).join('') +
           '</div>' +
           '<div style="display: flex; gap: 10px;">' +
-            '<button class="btn btn-secondary" style="flex: 1;" onclick="closeMigrationPreview()">取消</button>' +
-            '<button class="btn btn-primary" style="flex: 1;" onclick="confirmGoogleMigration()">导入选中</button>' +
+            '<button class="btn btn-secondary" style="flex: 1;" onclick="closeMigrationPreview()">' + escapeHTML(t('cancel')) + '</button>' +
+            '<button class="btn btn-primary" style="flex: 1;" onclick="confirmGoogleMigration()">' + escapeHTML(t('transferImportSelected')) + '</button>' +
           '</div>' +
         '</div>';
 
@@ -657,27 +754,34 @@ export function getGoogleMigrationCode() {
       // 保存密钥数据供导入使用
       window.pendingMigrationSecrets = parsedSecrets;
 
-      setTimeout(function() { modal.classList.add('show'); }, 10);
-      disableBodyScroll();
+      revealGoogleMigrationModal(modal);
+      if (!refreshOnly) disableBodyScroll();
     }
 
     /**
      * 关闭迁移预览模态框
      */
-    function closeMigrationPreview() {
-      const modal = document.getElementById('migrationPreviewModal');
-      if (modal) {
-        modal.classList.remove('show');
-        setTimeout(function() { modal.remove(); }, 300);
+    function closeMigrationPreview(preservePendingSecrets) {
+      dismissGoogleMigrationModal('migrationPreviewModal');
+      if (!preservePendingSecrets) {
+        // 续传未触发 / 用户主动取消时，连带清掉累计的失败明细，避免下一次导入串入旧状态
+        window.pendingMigrationSecrets = null;
+        window.pendingMigrationPriorSuccessCount = 0;
+        window.pendingMigrationPriorFailCount = 0;
+        window.pendingMigrationPriorFailures = [];
+        window.pendingMigrationPriorQueuedCount = 0;
       }
-      window.pendingMigrationSecrets = null;
-      enableBodyScroll();
     }
 
     /**
      * 显示导入结果模态框（包含失败详情）
      */
-    function showImportResultModal(successCount, failCount, failedDetails) {
+    function showImportResultModal(successCount, failCount, failedDetails, refreshOnly = false) {
+      currentGoogleImportResult = [successCount, failCount, failedDetails];
+      const localizedDetails = Array.isArray(failedDetails)
+        ? failedDetails.map(item => typeof item === 'string' ? localizeMigrationMessage(item) : '• ' + (item.name || t('transferUnknown')) + ': ' + localizeMigrationMessage(item.error || t('transferUnknownError'))).join('\\n')
+        : localizeMigrationMessage(failedDetails);
+      replaceGoogleMigrationModal('importResultModal', refreshOnly);
       // 创建结果模态框
       const modal = document.createElement('div');
       modal.id = 'importResultModal';
@@ -686,95 +790,268 @@ export function getGoogleMigrationCode() {
 
       const content = document.createElement('div');
       content.className = 'modal-content fab-modal-sm-content';
-      content.style.maxHeight = '80vh';
-      content.style.overflow = 'auto';
 
       content.innerHTML =
         '<div class="modal-header">' +
-          '<h2>📊 导入结果</h2>' +
-          '<button class="close-btn" onclick="closeImportResultModal()">&times;</button>' +
+          '<h2>' + escapeHTML(t('transferImportResult')) + '</h2>' +
+          '<button class="close-btn" type="button" aria-label="' + escapeHTML(t('transferCloseDialog')) + '" onclick="closeImportResultModal()">' + dialogIcon('close') + '</button>' +
         '</div>' +
         '<div class="modal-body">' +
           '<div style="text-align: center; margin-bottom: 20px;">' +
-            '<div style="font-size: 48px; margin-bottom: 10px;">⚠️</div>' +
-            '<div style="font-size: 16px; color: var(--text-primary);">' +
-              '成功 <span style="color: #4CAF50; font-weight: bold;">' + successCount + '</span> 个，' +
-              '失败 <span style="color: #f44336; font-weight: bold;">' + failCount + '</span> 个' +
+            '<div class="dialog-result-icon">' + dialogIcon(failCount ? 'warning' : 'check') + '</div>' +
+            '<div style="font-size: var(--dialog-body-size); color: var(--text-primary);">' +
+              escapeHTML(t('transferSuccessfulLabel')) + '<span style="color: var(--dialog-success); font-weight: bold;">' + successCount + '</span>' + escapeHTML(t('transferCountComma')) +
+              escapeHTML(t('transferFailedLabel')) + '<span style="color: var(--dialog-danger); font-weight: bold;">' + failCount + '</span>' + escapeHTML(t('transferCountUnit')) +
             '</div>' +
           '</div>' +
           '<div style="background: var(--bg-secondary); border-radius: 8px; padding: 15px; margin-bottom: 15px;">' +
-            '<div style="font-weight: 600; margin-bottom: 10px; color: #f44336;">❌ 失败详情：</div>' +
-            '<div style="font-size: 13px; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">' + failedDetails + '</div>' +
+            '<div style="font-weight: 600; margin-bottom: 10px; color: var(--dialog-danger);">' + escapeHTML(t('transferFailureDetails')) + '</div>' +
+            '<div style="font-size: var(--dialog-caption-size); color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">' + escapeHTML(localizedDetails) + '</div>' +
           '</div>' +
-          '<div style="text-align: center;">' +
-            '<button class="btn btn-primary" onclick="closeImportResultModal()">确定</button>' +
+          '<div class="dialog-result-actions">' +
+            '<button class="btn btn-primary" onclick="closeImportResultModal()">' + escapeHTML(t('ok')) + '</button>' +
           '</div>' +
         '</div>';
 
       modal.appendChild(content);
       document.body.appendChild(modal);
 
-      setTimeout(function() { modal.classList.add('show'); }, 10);
-      disableBodyScroll();
+      revealGoogleMigrationModal(modal);
+      if (!refreshOnly) disableBodyScroll();
     }
 
     /**
      * 关闭导入结果模态框
      */
     function closeImportResultModal() {
-      const modal = document.getElementById('importResultModal');
-      if (modal) {
-        modal.classList.remove('show');
-        setTimeout(function() { modal.remove(); }, 300);
-      }
-      enableBodyScroll();
+      dismissGoogleMigrationModal('importResultModal');
     }
 
     /**
      * 确认导入 Google 迁移的密钥
      */
+    // 由构建期从 LIMITS.BULK_IMPORT_CHUNK_SIZE 注入，与后端 batch.js/validation.js 保持一致
+    const GOOGLE_MIGRATION_IMPORT_CHUNK_SIZE = ${LIMITS.BULK_IMPORT_CHUNK_SIZE};
+
+    function splitGoogleMigrationImportItems(items, chunkSize) {
+      const chunks = [];
+      for (let i = 0; i < items.length; i += chunkSize) {
+        chunks.push(items.slice(i, i + chunkSize));
+      }
+      return chunks;
+    }
+
+    async function readGoogleMigrationImportErrorMessage(response) {
+      try {
+        const error = await response.clone().json();
+        return error.message || error.error || ('HTTP ' + response.status);
+      } catch (jsonError) {
+        try {
+          const text = await response.text();
+          return text || ('HTTP ' + response.status);
+        } catch (textError) {
+          return 'HTTP ' + response.status;
+        }
+      }
+    }
+
+    function createGoogleMigrationImportError(message, meta) {
+      const error = new Error(message);
+      Object.assign(error, meta);
+      return error;
+    }
+
+    async function importGoogleMigrationSecretsIndividually(items, startIndex) {
+      let successCount = 0;
+      let failCount = 0;
+      const results = [];
+
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index];
+        const globalIndex = startIndex + index;
+
+        try {
+          const response = await authenticatedFetch('/api/secrets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(item)
+          });
+
+          if (response.ok) {
+            successCount++;
+            results.push({
+              index: globalIndex,
+              success: true,
+              secret: {
+                name: item.name
+              }
+            });
+          } else {
+            failCount++;
+            const errorMessage = await readGoogleMigrationImportErrorMessage(response);
+            results.push({
+              index: globalIndex,
+              success: false,
+              error: errorMessage
+            });
+          }
+        } catch (error) {
+          failCount++;
+          const errorMessage = error && error.message ? error.message : t('transferUnknownError');
+          results.push({
+            index: globalIndex,
+            success: false,
+            error: errorMessage
+          });
+        }
+      }
+
+      return { successCount, failCount, results };
+    }
+
+    async function importGoogleMigrationSecretsInChunks(items) {
+      let successCount = 0;
+      let failCount = 0;
+      let queuedCount = 0;
+      const results = [];
+      const chunks = splitGoogleMigrationImportItems(items, GOOGLE_MIGRATION_IMPORT_CHUNK_SIZE);
+
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+        const chunk = chunks[chunkIndex];
+        const startIndex = chunkIndex * GOOGLE_MIGRATION_IMPORT_CHUNK_SIZE;
+        // Covers the response body too. The server may still save a batch whose
+        // request timed out, so that batch is reported with an unknown outcome.
+        const controller = new AbortController();
+        const timeoutId = setTimeout(function() { controller.abort(); }, GOOGLE_MIGRATION_IMPORT_TIMEOUT_MS);
+
+        try {
+          const response = await authenticatedFetch('/api/secrets/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              secrets: chunk,
+              immediateBackup: chunkIndex === chunks.length - 1,
+              chunkIndex: chunkIndex + 1,
+              chunkCount: chunks.length
+            }),
+            signal: controller.signal
+          });
+
+          if (response.ok) {
+            const result = await response.json();
+
+            // 离线时 Service Worker 只把这一片放进本机队列（202），联网后才真正导入
+            if (result && result.queued && result.offline) {
+              queuedCount += chunk.length;
+              continue;
+            }
+
+            const chunkSuccessCount = typeof result.successCount === 'number' ? result.successCount : chunk.length;
+            const chunkFailCount = typeof result.failCount === 'number' ? result.failCount : 0;
+
+            successCount += chunkSuccessCount;
+            failCount += chunkFailCount;
+
+            if (Array.isArray(result.results)) {
+              result.results.forEach(function(itemResult, index) {
+                results.push(Object.assign({}, itemResult, {
+                  index: typeof itemResult.index === 'number' ? itemResult.index + startIndex : startIndex + index
+                }));
+              });
+            }
+
+            continue;
+          }
+
+          if (response.status === 429) {
+            throw createGoogleMigrationImportError(t('transferRateLimited'), {
+              partialSuccessCount: successCount,
+              partialFailCount: failCount,
+              partialQueuedCount: queuedCount,
+              processedItems: successCount + failCount + queuedCount,
+              results: results.slice(),
+              chunkIndex: chunkIndex + 1,
+              chunkCount: chunks.length
+            });
+          }
+          if (response.status >= 500) {
+            throw createGoogleMigrationImportError(t('transferBatchResponseError', { index: (chunkIndex + 1), count: chunks.length }), {
+              partialSuccessCount: successCount,
+              partialFailCount: failCount,
+              partialQueuedCount: queuedCount,
+              processedItems: successCount + failCount + queuedCount,
+              results: results.slice(),
+              chunkIndex: chunkIndex + 1,
+              chunkCount: chunks.length
+            });
+          }
+          throw createGoogleMigrationImportError(t('transferBatchFailed', { index: (chunkIndex + 1), count: chunks.length, error: await readGoogleMigrationImportErrorMessage(response) }), {
+            partialSuccessCount: successCount,
+            partialFailCount: failCount,
+            partialQueuedCount: queuedCount,
+            processedItems: successCount + failCount + queuedCount,
+            results: results.slice(),
+            chunkIndex: chunkIndex + 1,
+            chunkCount: chunks.length
+          });
+
+        } catch (error) {
+          throw createGoogleMigrationImportError(
+            error instanceof Error && !controller.signal.aborted
+              ? error.message
+              : t('transferBatchRequestError', { index: (chunkIndex + 1), count: chunks.length }),
+            {
+              partialSuccessCount: successCount,
+              partialFailCount: failCount,
+              partialQueuedCount: queuedCount,
+              processedItems: successCount + failCount + queuedCount,
+              results: results.slice(),
+              chunkIndex: chunkIndex + 1,
+              chunkCount: chunks.length,
+              cause: error
+            }
+          );
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
+
+      return { successCount, failCount, queuedCount, results };
+    }
+
     async function confirmGoogleMigration() {
+      if (googleMigrationImportInProgress) {
+        // Keep this preview open; it can be imported once the current import ends.
+        showCenterToast('⏳', t('transferImporting'));
+        return;
+      }
       const pendingSecrets = window.pendingMigrationSecrets;
       if (!pendingSecrets || pendingSecrets.length === 0) {
-        showCenterToast('❌', '没有可导入的密钥');
+        showCenterToast('❌', t('transferNoImportKeys'));
         closeMigrationPreview();
         return;
       }
 
-      // 获取选中的密钥
       const selectedSecrets = pendingSecrets.filter(function(s, i) {
         const checkbox = document.getElementById('migrate-' + i);
         return checkbox && checkbox.checked;
       });
 
       if (selectedSecrets.length === 0) {
-        showCenterToast('⚠️', '请至少选择一个密钥');
+        showCenterToast('⚠️', t('transferSelectKey'));
         return;
       }
 
-      // 关闭预览
-      closeMigrationPreview();
+      window.pendingMigrationSecrets = selectedSecrets.slice();
+      closeMigrationPreview(true);
+      const previewGeneration = googleMigrationPreviewGeneration;
+      // False once another preview opened; its selection then owns the pending state.
+      const ownsPendingState = () => googleMigrationPreviewGeneration === previewGeneration;
+      showCenterToast('⏳', t('transferImportingCount', { count: selectedSecrets.length }));
 
-      // 显示导入进度
-      showCenterToast('⏳', '正在导入 ' + selectedSecrets.length + ' 个密钥...');
-
-      // 准备批量导入的数据
       const secretsToImport = selectedSecrets.map(function(secret) {
-        // 解析 name 字段，可能包含 issuer:account 格式
-        let serviceName = secret.issuer || '';
-        let accountName = secret.name || '';
-
-        // 如果 name 包含冒号，可能是 issuer:account 格式
-        if (!serviceName && accountName.includes(':')) {
-          const parts = accountName.split(':');
-          serviceName = parts[0];
-          accountName = parts.slice(1).join(':');
-        }
-
-        // 如果还是没有服务名，使用账户名或默认值
-        if (!serviceName) {
-          serviceName = accountName || '导入的密钥';
-        }
+        const accountName = googleMigrationEntryNames(secret).accountName;
+        const serviceName = googleMigrationSavedServiceName(secret);
 
         return {
           name: serviceName,
@@ -787,45 +1064,120 @@ export function getGoogleMigrationCode() {
         };
       });
 
+      // 本轮进入时从 prior 状态继承（续传时非零），完成/部分失败时再写回。
+      // 关键不变量：accumulate results across retries，让最终 showImportResultModal 汇总整批（含早先分片里被服务端拒绝的条目）
+      const priorSuccessCountAtStart = typeof window.pendingMigrationPriorSuccessCount === 'number' ? window.pendingMigrationPriorSuccessCount : 0;
+      const priorFailCountAtStart = typeof window.pendingMigrationPriorFailCount === 'number' ? window.pendingMigrationPriorFailCount : 0;
+      const priorFailuresAtStart = Array.isArray(window.pendingMigrationPriorFailures) ? window.pendingMigrationPriorFailures.slice() : [];
+      // 之前各轮离线时只进了本机队列的条数，续传完成后仍要提示它们待同步
+      const priorQueuedCountAtStart = typeof window.pendingMigrationPriorQueuedCount === 'number' ? window.pendingMigrationPriorQueuedCount : 0;
+
+      function buildFailureLine(originalSecret, errMsg) {
+        const name = originalSecret ? googleMigrationSavedServiceName(originalSecret) : '';
+        return { name, error: errMsg || '' };
+      }
+
+      googleMigrationImportInProgress = true;
       try {
-        // 使用批量导入 API，一次性导入所有密钥
-        const response = await authenticatedFetch('/api/secrets/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ secrets: secretsToImport })
-        });
+        const importResult = await importGoogleMigrationSecretsInChunks(secretsToImport);
+        const successCount = importResult.successCount;
+        const failCount = importResult.failCount;
+        const results = importResult.results;
 
-        if (response.ok) {
-          const result = await response.json();
-          const successCount = result.successCount || 0;
-          const failCount = result.failCount || 0;
-          const results = result.results || [];
+        await loadSecrets();
 
-          // 刷新列表
-          await loadSecrets();
+        const thisRunFailures = (results || [])
+          .filter(function(r) { return r && r.success === false; })
+          .map(function(r) { return buildFailureLine(selectedSecrets[r.index], r.error); });
 
-          // 显示结果
-          if (failCount === 0) {
-            showCenterToast('✅', '成功导入 ' + successCount + ' 个密钥');
-          } else {
-            // 收集失败的密钥信息
-            const failedItems = results.filter(function(r) { return !r.success; });
-            const failedDetails = failedItems.map(function(r) {
-              const originalSecret = selectedSecrets[r.index];
-              const name = originalSecret ? (originalSecret.issuer || originalSecret.name || '未知') : '未知';
-              return '• ' + name + ': ' + r.error;
-            }).join('\\n');
+        const aggregateSuccess = priorSuccessCountAtStart + successCount;
+        const aggregateFail = priorFailCountAtStart + failCount;
+        const aggregateFailureLines = priorFailuresAtStart.concat(thisRunFailures);
 
-            // 显示详细的失败信息
-            showImportResultModal(successCount, failCount, failedDetails);
-          }
-        } else {
-          const error = await response.json();
-          showCenterToast('❌', '导入失败: ' + (error.message || error.error || '未知错误'));
+        // 成功完成整批，清空续传状态
+        if (ownsPendingState()) {
+          window.pendingMigrationSecrets = null;
+          window.pendingMigrationPriorSuccessCount = 0;
+          window.pendingMigrationPriorFailCount = 0;
+          window.pendingMigrationPriorFailures = [];
+          window.pendingMigrationPriorQueuedCount = 0;
+        }
+
+        if (priorQueuedCountAtStart + importResult.queuedCount > 0) {
+          // 未联网的部分（含之前各轮）只在本机排队，不能报成已导入；同步进度见「未同步更改」
+          showCenterToast('📥', t('coreQueued'));
+        } else if (aggregateFail === 0) {
+          showCenterToast('✅', t('transferImported', { count: aggregateSuccess }));
+        }
+        if (aggregateFail > 0) {
+          showImportResultModal(aggregateSuccess, aggregateFail, aggregateFailureLines);
         }
       } catch (error) {
-        console.error('批量导入出错:', error);
-        showCenterToast('❌', '导入失败: ' + error.message);
+        console.error('Google 迁移批量导入出错:', error);
+        const partialSuccessCount = typeof error?.partialSuccessCount === 'number' ? error.partialSuccessCount : 0;
+        const partialFailCount = typeof error?.partialFailCount === 'number' ? error.partialFailCount : 0;
+        const processedItems = Math.min(
+          typeof error?.processedItems === 'number' ? error.processedItems : partialSuccessCount + partialFailCount,
+          selectedSecrets.length
+        );
+        const remainingSecrets = selectedSecrets.slice(processedItems);
+
+        // 本轮已完成分片里的失败项（服务端返回的 per-item error）并入 prior 累计
+        const thisRunFailures = Array.isArray(error?.results)
+          ? error.results
+              .filter(function(r) { return r && r.success === false; })
+              .map(function(r) { return buildFailureLine(selectedSecrets[r.index], r.error); })
+          : [];
+        const aggregateSuccess = priorSuccessCountAtStart + partialSuccessCount;
+        const aggregateFail = priorFailCountAtStart + partialFailCount;
+        const aggregateFailureLines = priorFailuresAtStart.concat(thisRunFailures);
+
+        await loadSecrets();
+
+        if (remainingSecrets.length > 0) {
+          // 续传：把累计状态持久化，下一轮 confirmGoogleMigration 会读回来。
+          // A newer preview keeps its own selection, so the rest of this
+          // import is not kept and the message must not offer to continue it.
+          const canContinue = ownsPendingState();
+          if (canContinue) {
+            window.pendingMigrationSecrets = remainingSecrets;
+            window.pendingMigrationPriorSuccessCount = aggregateSuccess;
+            window.pendingMigrationPriorFailCount = aggregateFail;
+            window.pendingMigrationPriorFailures = aggregateFailureLines;
+            window.pendingMigrationPriorQueuedCount = priorQueuedCountAtStart + (typeof error?.partialQueuedCount === 'number' ? error.partialQueuedCount : 0);
+          }
+
+          if (aggregateSuccess > 0) {
+            showCenterToast('⚠️', canContinue
+              ? t('transferMigrationPaused', { success: aggregateSuccess, remaining: remainingSecrets.length, error: error.message })
+              : t('transferMigrationStopped', { success: aggregateSuccess, error: error.message }));
+          } else {
+            showCenterToast('❌', t('transferMigrationInterrupted', { remaining: remainingSecrets.length, error: error.message }));
+          }
+          if (canContinue) showGoogleMigrationPreview(remainingSecrets);
+        } else if (aggregateSuccess > 0 || aggregateFail > 0) {
+          // 没有剩余可续传、但本轮或之前已有实际处理结果：汇总展示，清空续传状态
+          if (ownsPendingState()) {
+            window.pendingMigrationSecrets = null;
+            window.pendingMigrationPriorSuccessCount = 0;
+            window.pendingMigrationPriorFailCount = 0;
+            window.pendingMigrationPriorFailures = [];
+            window.pendingMigrationPriorQueuedCount = 0;
+          }
+
+          if (aggregateFail === 0) {
+            showCenterToast('⚠️', t('transferMigrationStopped', { success: aggregateSuccess, error: error.message }));
+          } else {
+            showImportResultModal(aggregateSuccess, aggregateFail, aggregateFailureLines);
+          }
+        } else {
+          // 首轮未产生任何结果就失败：重新打开预览，让用户整批重试
+          // （showGoogleMigrationPreview 会把 selectedSecrets 写回 window.pendingMigrationSecrets）
+          showCenterToast('❌', t('transferImportFailed') + error.message);
+          if (ownsPendingState()) showGoogleMigrationPreview(selectedSecrets);
+        }
+      } finally {
+        googleMigrationImportInProgress = false;
       }
     }
 `;

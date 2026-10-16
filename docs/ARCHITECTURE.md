@@ -41,6 +41,11 @@
                    │
                    ▼
 ┌─────────────────────────────────────────────────────┐
+│   Durable Object SecretsStore（依次处理密钥读写）    │
+└──────────────────┬──────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────┐
 │        Cloudflare KV（数据存储层）                   │
 │   全球分布式键值存储 + 自动加密 + 低延迟             │
 └─────────────────────────────────────────────────────┘
@@ -91,7 +96,9 @@
 
 ## 代码结构
 
-### 完整目录树
+### 主要目录结构
+
+下图展示主要模块，完整文件清单以 `src/` 目录为准。OTP 的 HMAC 与 Base32 实现在 `otp/generator.js`，数据加密使用 `utils/encryption.js`，密码哈希和 JWT 使用 `utils/auth.js`；加密运算调用 Web Crypto API。
 
 ```
 src/
@@ -130,6 +137,12 @@ src/
 │   │                              # - 样式集成
 │   │                              # - 脚本集成
 │   │
+│   ├── quickOtp.js                # 🔢 公开 OTP 输入与验证码页面
+│   ├── standalone.js              # 🖥️ 独立页面共享 Fluent 主题
+│   ├── offlinePage.js             # 📴 离线兜底页面
+│   ├── setupPage.js               # 🔧 首次设置页面
+│   ├── dialogIcons.js             # 🧩 对话框 SVG 图标
+│   │
 │   ├── manifest.js                # 📱 PWA Manifest
 │   │                              # - 应用信息
 │   │                              # - 图标定义
@@ -143,17 +156,30 @@ src/
 │   ├── scripts/                   # 📜 前端 JavaScript 模块
 │   │   ├── index.js              # 模块集成入口
 │   │   ├── state.js              # 全局状态管理
+│   │   ├── time.js               # 时间校准
 │   │   ├── auth.js               # 认证逻辑
+│   │   ├── otp.js                # OTP 计算与动效
+│   │   ├── ui.js                 # 主题与弹窗交互
+│   │   ├── search.js             # 搜索与显示控制
+│   │   ├── settings.js           # 设置面板
 │   │   ├── core.js               # 核心业务逻辑
+│   │   ├── serviceAggregation.js # 服务分组
 │   │   ├── utils.js              # 工具函数
-│   │   └── pwa.js                # PWA 功能
+│   │   ├── pwa.js                # PWA 功能
+│   │   └── moduleLoader.js       # 懒加载模块入口
 │   │
 │   └── styles/                    # 🎨 前端 CSS 模块
 │       ├── index.js              # 样式集成入口
+│       ├── variables.js          # 主题变量和过渡
 │       ├── base.js               # 基础样式
 │       ├── components.js         # 组件样式
 │       ├── modals.js             # 模态框样式
-│       └── responsive.js         # 响应式样式
+│       ├── responsive.js         # 响应式样式
+│       ├── progress.js           # 共享进度条常量
+│       ├── workspace.js          # Fluent 2 工作区
+│       ├── dialogs.js            # Fluent 2 对话框
+│       ├── setup.js              # 首次设置页
+│       └── backupDocument.js     # HTML 备份文档
 │
 └── utils/                         # 🛠️ 工具模块
     ├── auth.js                    # 🔑 认证系统
@@ -163,16 +189,12 @@ src/
     │
     ├── backup.js                  # 💾 智能备份系统
     │                              # - 事件驱动备份
-    │                              # - 防抖机制
+    │                              # - 并发合并 / 后台执行
     │                              # - 自动清理
     │
     ├── constants.js               # 📋 常量定义
     │                              # - KV 键名
     │                              # - 配置常量
-    │
-    ├── crypto.js                  # 🔐 加密工具
-    │                              # - HMAC-SHA1/256
-    │                              # - Base32 编解码
     │
     ├── encryption.js              # 🔒 数据加密
     │                              # - AES-GCM 256
@@ -191,10 +213,9 @@ src/
     ├── monitoring.js              # 📊 监控系统
     │                              # - 错误追踪
     │                              # - 性能监控
-    │                              # - Sentry 集成
     │
     ├── rateLimit.js               # 🛡️ 请求限流
-    │                              # - 固定窗口计数器算法
+    │                              # - 滑动窗口算法
     │                              # - 可配置策略
     │                              # - 基于 KV 存储
     │
@@ -271,6 +292,7 @@ export default {
 | `/api/secrets/{id}`        | PUT    | `handleUpdateSecret()`    | ✅   |
 | `/api/secrets/{id}`        | DELETE | `handleDeleteSecret()`    | ✅   |
 | `/api/secrets/batch`       | POST   | `handleBatchAddSecrets()` | ✅   |
+| `/api/secrets/export`      | POST   | `handleExportSecrets()`   | ✅   |
 | `/api/backup`              | GET    | `handleGetBackups()`      | ✅   |
 | `/api/backup`              | POST   | `handleBackupSecrets()`   | ✅   |
 | `/api/backup/restore`      | POST   | `handleRestoreBackup()`   | ✅   |
@@ -314,20 +336,22 @@ async function saveSecretsToKV(env, secrets, reason) {
 }
 ```
 
+#### 依次处理密钥读写（`storage/secrets-store.js`）
+
+所有密钥存在一份加密的 KV 文档里，每次修改都是「读取整份 → 修改 → 整份写回」。Workers KV 不支持原子更新，两个同时进行的修改会读到同一份旧文档，后写入的一次会覆盖另一次；写入后的一段时间内，KV 还可能返回旧文档。
+
+因此路由不直接调用读写密钥的处理函数，而是调用 `runSecretsOperation(操作名, request, env, ctx)`：
+
+- 绑定了 `SECRETS_STORE` 时，请求转给唯一的 Durable Object `SecretsStore`，按到达顺序逐个执行原来的处理函数。涉及的操作是密钥列表、新增、编辑、删除、批量导入、HOTP 计数器递增与压实、手动备份、恢复备份；定时备份通过 `readSecretsSnapshot()` 读取。
+- `SecretsStore` 执行处理函数时，`env.SECRETS_KV` 换成 `createConsistentKV()`（`storage/consistent-kv.js`）。对 `secrets`、`hotp-counter-epoch` 和 `hotp-counter:*` 这些键，它在 Durable Object 存储里保留最近一次写入的副本，并把每次写入同步到 KV，KV 元数据中记录 Durable Object 的 id 和该键的修订号。读取时同时比较两边：KV 返回的是较旧的修订号时用副本；KV 中的值没有本存储的修订号（例如回滚后旧版本写入的数据）时，采用 KV 中的新值，但已经见过的旧值（按指纹识别）和「键不存在」的缓存结果不会覆盖副本。其他键原样读写 KV。
+- 没有绑定时（例如直接粘贴 `dist/worker.js`），处理函数在收到请求的实例里执行，修改只在该实例内依次处理。
+- 修改请求无法送达 Durable Object 时返回 503「无法确认本次修改是否已保存，请刷新后重试」；读取请求改为直接读取 KV。
+
+账户数据始终完整保存在 `SECRETS_KV` 中，旧版本和没有绑定的部署读取的都是同一份数据。
+
 #### 请求限流集成
 
-```javascript
-export async function handleAddSecret(request, env) {
-	// 1. 检查限流
-	const rateLimitResult = await checkRateLimit(request, env, RATE_LIMIT_PRESETS.api);
-
-	if (!rateLimitResult.allowed) {
-		return createRateLimitResponse(rateLimitResult);
-	}
-
-	// 2. 处理请求...
-}
-```
+限流由具体处理函数调用。例如删除密钥使用 `getClientIdentifier(request, 'ip')` 得到客户端 IP，再调用 `checkRateLimit(scopedRateLimitKey('delete-secret', clientIP), env, RATE_LIMIT_PRESETS.sensitive)`，每类操作单独计数；新增和读取密钥当前没有显式限流。路由入口没有统一套用 `api` 或 `global` 预设。各端点实际限制及共享计数规则见 [API 参考](API_REFERENCE.md#rate-limiting)。
 
 ---
 
@@ -347,14 +371,16 @@ export async function handleAddSecret(request, env) {
  * 3. 使用 HMAC-SHA1 计算哈希值
  * 4. 动态截断生成 6 位数字 OTP
  */
-export async function generateTOTP(secret, options = {}) {
+export async function generateOTP(secret, loadTime, options = {}) {
 	const {
-		timeStep = 30, // 时间步长（秒）
+		period = 30, // 时间步长（秒）
 		digits = 6, // OTP 长度
 		algorithm = 'SHA1', // 哈希算法
+		type = 'TOTP',
 	} = options;
 
-	const counter = Math.floor(Date.now() / 1000 / timeStep);
+	const timeForCalculation = loadTime || Math.floor(Date.now() / 1000);
+	const counter = type === 'HOTP' ? options.counter || 0 : Math.floor(timeForCalculation / period);
 	return await generateHOTP(secret, counter, { digits, algorithm });
 }
 ```
@@ -556,7 +582,7 @@ export async function decryptSecrets(data, env) {
 ```
 用户操作 → 数据变更 → 触发备份
     ↓
-防抖检查 (5分钟内只备份一次)
+如有请求上下文则转入 waitUntil 后台执行
     ↓
 执行备份 → 加密 → 存储到 KV
     ↓
@@ -579,84 +605,44 @@ Cron 触发 (每天)
 class BackupManager {
 	constructor(env) {
 		this.env = env;
-		this.lastBackupTime = 0;
-		this.pendingBackup = null;
+		this.logger = getLogger(env);
 		this.backupInProgress = false;
+		this.pendingBackups = [];
 	}
 
 	/**
-	 * 触发备份（带防抖）
+	 * 触发备份（支持并发合并）
 	 */
 	async triggerBackup(secrets, options = {}) {
-		const { immediate = false, reason = 'event-driven' } = options;
+		const { immediate = false, reason = 'event-driven', ctx } = options;
 
-		// 如果正在备份，跳过
 		if (this.backupInProgress) {
-			return null;
+			this.pendingBackups.push({ secrets, reason, ctx, immediate });
+			return { queued: true };
 		}
 
-		// 防抖检查（除非是立即备份）
-		if (!immediate && !this.shouldBackup()) {
-			// 取消之前的待处理备份
-			if (this.pendingBackup) {
-				clearTimeout(this.pendingBackup);
-			}
-
-			// 设置延迟备份
-			const remainingTime = DEBOUNCE_INTERVAL - (Date.now() - this.lastBackupTime);
-			this.pendingBackup = setTimeout(() => {
-				this.executeBackup(secrets, reason);
-			}, remainingTime);
-
-			return { scheduled: true, delay: remainingTime };
-		}
-
-		// 立即执行备份
-		return await this.executeBackup(secrets, reason);
+		return this.executeBackup(secrets, reason, ctx, { immediate });
 	}
 
 	/**
 	 * 执行备份
 	 */
-	async executeBackup(secrets, reason) {
+	async executeBackup(secrets, reason, ctx) {
 		this.backupInProgress = true;
-		const startTime = Date.now();
 
 		try {
-			// 1. 生成备份ID
-			const backupId = `backup_${Date.now()}`;
-
-			// 2. 加密备份数据
-			const backupData = {
-				id: backupId,
-				timestamp: new Date().toISOString(),
-				count: secrets.length,
+			const backupEntry = await createBackupEntry(secrets, this.env, {
+				format: await resolveConfiguredBackupFormat(this.env, this.logger),
 				reason,
-				data: secrets,
-			};
-
-			const encrypted = await encryptData(backupData, this.env);
-
-			// 3. 保存到 KV
-			await this.env.SECRETS_KV.put(backupId, encrypted);
-
-			// 4. 更新备份列表
-			await this._updateBackupsList(backupId);
-
-			// 5. 清理旧备份
-			await this._cleanupOldBackupsAsync();
-
-			// 6. 记录性能指标
-			const duration = Date.now() - startTime;
-			this.logger.info('✅ 备份成功', {
-				backupId,
-				reason,
-				count: secrets.length,
-				duration: `${duration}ms`,
 			});
 
-			this.lastBackupTime = Date.now();
-			return { success: true, backupId, duration };
+			await putBackupRecord(this.env, backupEntry.backupKey, backupEntry.backupContent, backupEntry.metadata);
+			ctx?.waitUntil?.(pushToAllWebDAV(backupEntry.backupKey, backupEntry.backupContent, this.env));
+			ctx?.waitUntil?.(pushToAllS3(backupEntry.backupKey, backupEntry.backupContent, this.env));
+			ctx?.waitUntil?.(pushToAllOneDrive(backupEntry.backupKey, backupEntry.backupContent, this.env));
+			ctx?.waitUntil?.(pushToAllGoogleDrive(backupEntry.backupKey, backupEntry.backupContent, this.env));
+			await this._cleanupOldBackupsAsync();
+			return { success: true, backupKey: backupEntry.backupKey, format: backupEntry.format };
 		} catch (error) {
 			this.logger.error('❌ 备份失败', { reason }, error);
 			throw error;
@@ -701,7 +687,6 @@ class BackupManager {
 └───────┬───────┘
         │
         ├─→ Console (开发环境)
-        ├─→ Sentry (生产环境)
         └─→ Cloudflare Analytics
 ```
 
@@ -777,192 +762,32 @@ class PerformanceTimer {
 }
 ```
 
-#### Sentry 集成
-
-```javascript
-class ErrorMonitor {
-	constructor(env) {
-		this.env = env;
-		this.sentryDSN = env.SENTRY_DSN;
-		this.enabled = !!this.sentryDSN;
-	}
-
-	captureError(error, context = {}, severity = ErrorSeverity.ERROR) {
-		// 生成错误ID
-		const errorId = `err_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-		// 本地日志
-		console.error('[ErrorMonitor]', {
-			errorId,
-			message: error.message,
-			stack: error.stack,
-			context,
-			severity,
-		});
-
-		// 发送到 Sentry（如果配置）
-		if (this.enabled) {
-			this._sendToSentry({
-				errorId,
-				error,
-				context,
-				severity,
-				timestamp: new Date().toISOString(),
-			});
-		}
-
-		return { errorId, captured: this.enabled };
-	}
-
-	async _sendToSentry(data) {
-		// Sentry API 集成
-		try {
-			await fetch(this.sentryDSN, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					event_id: data.errorId,
-					message: data.error.message,
-					level: data.severity.toLowerCase(),
-					exception: {
-						values: [
-							{
-								type: data.error.name,
-								value: data.error.message,
-								stacktrace: { frames: this._parseStackTrace(data.error.stack) },
-							},
-						],
-					},
-					extra: data.context,
-					timestamp: data.timestamp,
-				}),
-			});
-		} catch (err) {
-			console.error('[Sentry] Failed to send error:', err);
-		}
-	}
-}
-```
-
 ---
 
 ### 9. 限流系统 (`utils/rateLimit.js`)
 
-**职责**: 防止 API 滥用和 DDoS 攻击
+**职责**: 为显式调用它的处理函数提供基于 Cloudflare KV 的请求频率限制。
 
-**算法**: 固定窗口计数器 (Fixed Window Counter)
+`checkRateLimit` 默认使用滑动窗口，也保留 `algorithm: 'fixed-window'` 的兼容路径。默认路径使用 `ratelimit:v2:<key>` 存储请求时间戳：
 
-```
-时间轴: ───────────────────────────→
-         │    窗口 1     │    窗口 2     │
-      t=0s           t=60s          t=120s
-         └─────────────┘─────────────┘
-           计数器重置      计数器重置
+1. 从 KV 读取时间戳，过滤掉窗口外的记录。
+2. 记录数达到限额时拒绝请求，并以最早记录的过期时刻计算 `resetAt`。
+3. 未达到限额时追加当前时间戳并写回 KV，设置过期时间。
 
-窗口内计数: count ≤ maxAttempts
-窗口过期: resetAt 时间到达时，创建新窗口
-```
-
-**核心实现**:
-
-```javascript
-export async function checkRateLimit(key, env, options) {
-	const { maxAttempts = 5, windowSeconds = 60 } = options;
-	const rateLimitKey = `ratelimit:${key}`;
-
-	// 1. 获取当前限流数据
-	const data = await env.SECRETS_KV.get(rateLimitKey, 'json');
-	const now = Date.now();
-
-	// 2. 如果没有数据或窗口已过期，创建新窗口
-	if (!data || now > data.resetAt) {
-		await env.SECRETS_KV.put(
-			rateLimitKey,
-			JSON.stringify({
-				count: 1,
-				resetAt: now + windowSeconds * 1000,
-				firstRequest: now,
-			}),
-			{
-				expirationTtl: windowSeconds + 10,
-			},
-		);
-
-		return {
-			allowed: true,
-			remaining: maxAttempts - 1,
-			resetAt: now + windowSeconds * 1000,
-			limit: maxAttempts,
-		};
-	}
-
-	// 3. 检查是否超过限制
-	if (data.count >= maxAttempts) {
-		return {
-			allowed: false,
-			remaining: 0,
-			resetAt: data.resetAt,
-			limit: maxAttempts,
-		};
-	}
-
-	// 4. 增加计数
-	data.count++;
-	await env.SECRETS_KV.put(rateLimitKey, JSON.stringify(data), {
-		expirationTtl: Math.ceil((data.resetAt - now) / 1000) + 10,
-	});
-
-	return {
-		allowed: true,
-		remaining: maxAttempts - data.count,
-		resetAt: data.resetAt,
-		limit: maxAttempts,
-	};
-}
-```
+允许请求通常需要一次 KV 读取和一次写入。KV 读写不构成原子计数，因此该实现不保证高并发下严格的全局配额；KV 异常时采取 Fail Open，允许请求继续。
 
 **预设策略**:
 
-```javascript
-export const RATE_LIMIT_PRESETS = {
-	// 登录：每分钟 5 次
-	login: {
-		maxAttempts: 5,
-		windowSeconds: 60,
-	},
+| 预设          | 配置           |
+| ------------- | -------------- |
+| `login`       | 5 次 / 60 秒   |
+| `loginStrict` | 3 次 / 60 秒   |
+| `api`         | 30 次 / 60 秒  |
+| `sensitive`   | 10 次 / 60 秒  |
+| `bulk`        | 20 次 / 300 秒 |
+| `global`      | 100 次 / 60 秒 |
 
-	// API 操作：每分钟 30 次
-	api: {
-		maxAttempts: 30,
-		windowSeconds: 60,
-	},
-
-	// 敏感操作：每分钟 10 次
-	sensitive: {
-		maxAttempts: 10,
-		windowSeconds: 60,
-	},
-
-	// 批量操作：每 5 分钟 5 次
-	bulk: {
-		maxAttempts: 5,
-		windowSeconds: 300,
-	},
-
-	// 全局保护：每分钟 100 次
-	global: {
-		maxAttempts: 100,
-		windowSeconds: 60,
-	},
-};
-```
-
-**算法选择理由**:
-
-- ✅ 实现简单，性能高效（单次 KV 操作）
-- ✅ 内存占用低（只存储计数和窗口结束时间）
-- ✅ 完美适配 Cloudflare Workers 无状态架构
-- ⚠️ 存在窗口边界效应（可能 2倍突发流量）
+以上是可复用配置，并非所有端点自动继承的规则。实际启用情况由处理函数的调用决定；共享相同 key 的操作也会共享计数记录。详见 [API 限流说明](API_REFERENCE.md#rate-limiting)。
 
 ---
 
@@ -983,10 +808,12 @@ graph TD
     F -->|否| I
     I --> J{路由类型}
     J -->|静态页面| K[生成 HTML]
-    J -->|API 请求| L{检查限流}
+    J -->|API 请求| L{处理函数是否启用限流?}
     J -->|PWA 资源| M[返回 Manifest/SW/Icon]
-    L -->|超过限流| N[返回 429]
-    L -->|通过| O[处理 API 请求]
+    L -->|是| L1{检查限流}
+    L1 -->|超过限流| N[返回 429]
+    L1 -->|通过| O[处理 API 请求]
+    L -->|否| O
     O --> P{操作类型}
     P -->|读取| Q[从 KV 读取]
     P -->|写入| R[验证数据]
@@ -1036,11 +863,8 @@ graph TD
     A[数据变更操作] --> B[保存到 KV]
     B --> C[触发备份]
     C --> D{正在备份?}
-    D -->|是| E[跳过]
-    D -->|否| F{防抖检查}
-    F -->|< 5分钟| G[取消旧备份]
-    G --> H[设置延迟备份]
-    F -->|≥ 5分钟| I[立即执行备份]
+    D -->|是| E[合并到待处理备份队列]
+    D -->|否| I[立即执行备份]
     I --> J[加密备份数据]
     J --> K[生成备份ID]
     K --> L[保存到 KV]
@@ -1059,72 +883,48 @@ graph TD
 
 ## 前端架构
 
-### 模块化 JavaScript (5 个模块)
+### 模块化 JavaScript
 
 ```
 scripts/
-├── state.js          # 全局状态变量
-│   └── 定义所有全局变量（secrets, scannerStream, etc.）
-│
-├── auth.js           # 认证逻辑
-│   ├── showLoginModal()
-│   ├── hideLoginModal()
-│   ├── checkAuth()
-│   ├── refreshAuthToken()
-│   └── authenticatedFetch()
-│
-├── core.js           # 核心业务逻辑 (最大模块，106KB)
-│   ├── loadSecrets()
-│   ├── renderSecrets()
-│   ├── handleAddSecret()
-│   ├── handleEditSecret()
-│   ├── handleDeleteSecret()
-│   ├── startOTPCountdown()
-│   ├── showQRCodeModal()
-│   ├── startQRScanner()
-│   ├── handleBatchImport()
-│   └── ... (50+ 个函数)
-│
-├── utils.js          # 工具函数
-│   ├── showCenterToast()
-│   ├── copyToClipboard()
-│   ├── validateBase32()
-│   ├── generateQRCodeDataURL()
-│   ├── waitForQRCodeLibrary()
-│   ├── formatOTPAuthURL()
-│   └── ... (20+ 个工具函数)
-│
-└── pwa.js            # PWA 功能
-    ├── Service Worker 注册
-    ├── PWA 模式检测
-    └── 更新检查
+├── utils.js / state.js / time.js        # 通用函数、状态与校准时间
+├── auth.js / otp.js                     # 认证、OTP 计算与刷新
+├── ui.js / search.js / settings.js      # 页面交互、显示控制与设置
+├── core.js / serviceAggregation.js      # 密钥业务与服务分组
+├── pwa.js / moduleLoader.js             # PWA 与按需模块加载
+├── versionCheck.js                      # 版本检查
+└── import/ export.js backup.js 等       # 按需加载的功能模块
 ```
 
 **模块加载流程**:
 
 ```
 page.js → scripts/index.js
-    ├─ import state.js    (全局变量初始化)
-    ├─ import auth.js     (认证函数定义)
-    ├─ import core.js     (核心业务逻辑)
-    ├─ import utils.js    (工具函数)
-    └─ import pwa.js      (PWA 功能)
+    ├─ utils.js / state.js / time.js
+    ├─ auth.js / otp.js
+    ├─ ui.js / search.js / settings.js
+    ├─ core.js / serviceAggregation.js
+    └─ pwa.js / moduleLoader.js / versionCheck.js
          ↓
     inline <script>
          ↓
     页面加载完成执行
 ```
 
-### 模块化 CSS (4 个模块)
+导入、导出、备份、二维码、Google 迁移和工具模块在默认模式下通过 `/modules/*.js` 按需加载；完整模式由 `scripts/index.js` 按依赖顺序直接拼接。
+
+### 模块化 CSS
 
 ```
 styles/
+├── variables.js      # 主题变量、浅深色配置和切换过渡
+│
 ├── base.js           # 基础样式
 │   ├── * { box-sizing, margin, padding }
 │   ├── body { font, background }
 │   ├── .container
 │   ├── .header
-│   └── .theme-toggle
+│   └── 基础表单与菜单
 │
 ├── components.js     # 组件样式
 │   ├── .secret-card
@@ -1140,20 +940,29 @@ styles/
 │   ├── .form-group
 │   └── .btn-*
 │
-└── responsive.js     # 响应式样式
-    ├── @media (max-width: 480px)
-    ├── @media (min-width: 481px)
-    └── @media (min-width: 1200px)
+├── responsive.js     # 响应式样式
+│   ├── @media (max-width: 480px)
+│   ├── @media (min-width: 481px)
+│   └── @media (min-width: 1200px)
+│
+├── progress.js       # 共享进度条尺寸与渐变常量
+├── workspace.js      # Fluent 2 主工作区和卡片
+├── dialogs.js        # Fluent 2 对话框与设置页
+├── setup.js          # 首次设置页
+└── backupDocument.js # HTML 备份/导出文档
 ```
 
 **样式加载流程**:
 
 ```
 page.js → styles/index.js
+    ├─ import variables.js
     ├─ import base.js
     ├─ import components.js
     ├─ import modals.js
-    └─ import responsive.js
+    ├─ import responsive.js
+    ├─ import workspace.js
+    └─ import dialogs.js
          ↓
     合并为单个 <style> 标签
          ↓
@@ -1166,75 +975,33 @@ page.js → styles/index.js
 
 ```
 Service Worker (sw.js)
-├── Static Cache (v2)
-│   ├── / (主页面)
+├── Versioned Cache: 2fa-cache-${SW_VERSION}
+│   ├── / (主页面离线回退)
 │   ├── /manifest.json
-│   ├── /icon-192.png
-│   └── /icon-512.png
-│
-├── CDN Cache (白名单)
-│   ├── jsQR.min.js
-│   └── qrcode.min.js
-│
-└── Runtime Cache
-    └── API 响应（不缓存）
+│   ├── /icon-192.png / icon-512.png
+│   └── 白名单 CDN（首次请求后缓存）
+├── IndexedDB: pending-operations
+│   └── 支持的离线写操作队列
+└── 激活新版本时清理旧缓存
 ```
 
 **缓存策略**:
 
-- **静态资源**: Cache First (缓存优先)
-- **CDN 资源**: Cache First + CORS 处理
-- **API 请求**: Network Only (始终从网络获取)
-- **其他外部资源**: Network Only + 静默失败
+- **主页**: Network First，失败时返回缓存或完整离线页
+- **Favicon 代理**: Cache First
+- **CDN 资源**: 缓存命中后后台更新；首次请求通过 CORS 获取并缓存
+- **API 请求**（Favicon 代理除外）: 请求网络，不缓存响应；支持的密钥写操作遇到网络错误时进入离线队列
+- **其他同源资源**: Network Only；网络错误时返回 503，无 Service Worker 缓存回退
+- **其他外部资源**: Network Only；网络错误时返回空 404，无 Service Worker 缓存回退
 
 **更新机制**:
 
-```javascript
-// 1. Service Worker 安装
-self.addEventListener('install', (event) => {
-	// 预缓存静态资源
-	event.waitUntil(
-		caches.open(CACHE_NAME).then((cache) => {
-			return cache.addAll(STATIC_RESOURCES);
-		}),
-	);
-	self.skipWaiting(); // 立即激活
-});
-
-// 2. Service Worker 激活
-self.addEventListener('activate', (event) => {
-	// 清理旧缓存
-	event.waitUntil(
-		caches.keys().then((names) => {
-			return Promise.all(names.filter((name) => name !== CACHE_NAME && name !== RUNTIME_CACHE).map((name) => caches.delete(name)));
-		}),
-	);
-	self.clients.claim(); // 立即控制页面
-});
-
-// 3. 拦截请求
-self.addEventListener('fetch', (event) => {
-	const url = new URL(event.request.url);
-
-	if (url.origin === location.origin) {
-		// 本地资源：缓存优先
-		event.respondWith(
-			caches.match(event.request).then((response) => {
-				return response || fetch(event.request);
-			}),
-		);
-	} else if (isCDNLibrary(url)) {
-		// CDN 资源：缓存优先 + CORS
-		event.respondWith(
-			caches.match(event.request).then((response) => {
-				return response || fetch(event.request, { mode: 'cors' });
-			}),
-		);
-	} else {
-		// 其他资源：直接透传
-		event.respondWith(fetch(event.request));
-	}
-});
+```text
+install  → 预缓存主页、manifest 和图标 → skipWaiting
+activate → 删除旧版本缓存 → clients.claim
+fetch /  → 请求网络 → 成功则更新缓存 → 失败则缓存/离线页
+fetch API → 请求网络 → 支持的写操作失败则保存到 IndexedDB
+fetch CDN → 命中缓存立即返回并后台更新；未命中则通过 CORS 获取
 ```
 
 ---
@@ -1345,35 +1112,14 @@ const handleGetSecrets = withPerformanceLogging(async (env) => {
 
 ### 6. 中间件模式 (Middleware Pattern)
 
-**应用**: 请求处理流水线
+**应用**: CORS、认证和日志等横切逻辑与具体业务处理分离。
 
+```text
+请求 → CORS / 日志 → 路由与认证 → 具体处理函数 → 响应
+                                  └─ 按需检查限流
 ```
-请求 → CORS中间件 → 认证中间件 → 限流中间件 → 路由处理 → 响应
-```
 
-```javascript
-// 中间件链
-async function handleRequest(request, env) {
-	// 中间件 1: CORS
-	const corsResponse = handleCORS(request);
-	if (corsResponse) return corsResponse;
-
-	// 中间件 2: 认证
-	if (requiresAuth(pathname)) {
-		const isAuthorized = await verifyAuth(request, env);
-		if (!isAuthorized) return createUnauthorizedResponse();
-	}
-
-	// 中间件 3: 限流
-	const rateLimitResult = await checkRateLimit(request, env);
-	if (!rateLimitResult.allowed) {
-		return createRateLimitResponse(rateLimitResult);
-	}
-
-	// 最终处理
-	return await routeRequest(pathname, method, request, env);
-}
-```
+当前路由没有统一的全局限流步骤。限流在具体处理函数中显式执行；`withRateLimit` 提供可选包装器，但不能据此认定所有路由都已接入。
 
 ### 7. 观察者模式 (Observer Pattern)
 
@@ -1483,7 +1229,7 @@ export function getBackupManager(env) {
 
 ### 水平扩展
 
-- ✅ 无状态设计：每个请求独立处理
+- ✅ 无状态设计：每个请求独立处理；读写密钥的请求由 Durable Object `SecretsStore` 依次处理
 - ✅ 全球分布：自动在边缘节点运行
 - ✅ 自动扩缩容：根据流量自动调整
 
@@ -1514,6 +1260,6 @@ export function getBackupManager(env) {
 
 - [部署指南](DEPLOYMENT.md) - 如何部署应用
 - [API 参考](API_REFERENCE.md) - API 端点文档
-- [功能文档](features/) - 各功能模块详解
+- [项目说明](../README.md) - 功能概览与使用指南
 
 ---

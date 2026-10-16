@@ -5,8 +5,12 @@
 - [认证](#认证)
 - [端点列表](#端点列表)
 - [密钥管理 API](#密钥管理-api)
+- [时间校准 API](#时间校准-api)
 - [OTP 生成 API](#otp-生成-api)
 - [备份管理 API](#备份管理-api)
+- [WebDAV 与 S3 同步 API](#webdav-与-s3-同步-api)
+- [云盘同步 API](#云盘同步-api)
+- [首次设置与系统设置 API](#首次设置与系统设置-api)
 - [认证 API](#认证-api)
 - [错误代码](#错误代码)
 - [Rate Limiting](#rate-limiting)
@@ -27,16 +31,28 @@ Cookie: auth_token=<JWT_TOKEN>
 
 **公开端点**（无需认证）:
 
+- `GET /setup` - 首次设置页面
+- `POST /api/setup` - 首次设置
 - `GET /` - 主页面
 - `GET /manifest.json` - PWA Manifest
 - `GET /sw.js` - Service Worker
 - `GET /icon-*.png` - PWA 图标
 - `POST /api/login` - 登录
-- `GET /otp/{secret}` - OTP 生成（传统方式）
+- `POST /api/logout` - 退出登录
+- `GET /api/time` - 客户端时间校准
+- `GET /otp` - OTP 使用说明
+- `GET /otp/{secret}` - OTP 生成
+- `GET /api/favicon/{domain}` - Favicon 代理
+- `GET /api/onedrive/oauth/callback` - OneDrive OAuth 回调
+- `GET /api/gdrive/oauth/callback` - Google Drive OAuth 回调
+
+**特殊端点**:
+
+- `POST /api/refresh-token` - 不经过全局认证中间件，但仍要求请求中携带有效 `auth_token` Cookie
 
 **受保护端点**（需要认证）:
 
-- 所有 `/api/*` 端点（除了 `/api/login`）
+- 其余所有 `/api/*` 端点
 
 ### 获取认证 Token
 
@@ -46,22 +62,23 @@ Cookie: auth_token=<JWT_TOKEN>
 
 ```json
 {
-	"username": "admin",
-	"password": "<YOUR_PASSWORD>"
+	"credential": "<YOUR_PASSWORD>"
 }
 ```
 
 **说明**:
 
-- `username`: 固定为 "admin"
-- `password`: 通过网页界面设置的管理员密码
+- `credential`: 通过网页界面设置的管理员密码
 
 **成功响应** (200 OK):
 
 ```json
 {
 	"success": true,
-	"message": "登录成功"
+	"message": "登录成功",
+	"token": "<JWT_TOKEN>",
+	"expiresAt": "2026-05-17T10:30:00.000Z",
+	"expiresIn": "30天"
 }
 ```
 
@@ -87,14 +104,17 @@ Set-Cookie: auth_token=<JWT_TOKEN>; HttpOnly; Secure; SameSite=Strict; Max-Age=6
 
 **认证**: ✅ 需要
 
-**描述**: 刷新当前 Token，延长过期时间
+**描述**: 刷新当前 Token，延长过期时间。请求中需要携带有效 `auth_token` Cookie，或通过 `Authorization: Bearer <token>` 头向后兼容。
 
 **成功响应** (200 OK):
 
 ```json
 {
 	"success": true,
-	"message": "Token 刷新成功"
+	"message": "令牌刷新成功",
+	"token": "<NEW_JWT_TOKEN>",
+	"expiresAt": "2026-05-17T10:30:00.000Z",
+	"expiresIn": "30天"
 }
 ```
 
@@ -108,25 +128,59 @@ Set-Cookie: auth_token=<NEW_JWT_TOKEN>; HttpOnly; Secure; SameSite=Strict; Max-A
 
 ## 端点列表
 
-| 端点                                   | 方法   | 认证 | 限流    | 描述             |
-| -------------------------------------- | ------ | ---- | ------- | ---------------- |
-| [/api/secrets](#获取所有密钥)          | GET    | ✅   | 60/min  | 获取所有密钥     |
-| [/api/secrets](#添加新密钥)            | POST   | ✅   | 60/min  | 添加新密钥       |
-| [/api/secrets/{id}](#更新密钥)         | PUT    | ✅   | 60/min  | 更新指定密钥     |
-| [/api/secrets/{id}](#删除密钥)         | DELETE | ✅   | 60/min  | 删除指定密钥     |
-| [/api/secrets/batch](#批量添加密钥)    | POST   | ✅   | 10/min  | 批量添加密钥     |
-| [/api/generate-otp](#生成-otp)         | POST   | ✅   | 100/min | 生成 OTP         |
-| [/api/backup](#手动触发备份)           | POST   | ✅   | 5/min   | 手动触发备份     |
-| [/api/backups](#获取备份列表)          | GET    | ✅   | 30/min  | 获取备份列表     |
-| [/api/backups/export/{id}](#导出备份)  | GET    | ✅   | 10/min  | 导出指定备份     |
-| [/api/backups/restore/{id}](#恢复备份) | POST   | ✅   | 5/min   | 恢复指定备份     |
-| [/api/login](#获取认证-token)          | POST   | ❌   | 5/min   | 用户登录         |
-| [/api/refresh-token](#token-刷新)      | POST   | ✅   | 60/min  | 刷新 Token       |
-| [/otp/{secret}](#传统-otp-生成)        | GET    | ❌   | 100/min | 生成 OTP（旧版） |
+限流列表示当前应用代码实际调用的限流规则；`-` 表示没有显式调用应用限流。各类操作分别计数，计数方式见 [Rate Limiting](#rate-limiting)。
+
+| 端点                                               | 方法   | 认证 | 限流   | 描述                         |
+| -------------------------------------------------- | ------ | ---- | ------ | ---------------------------- |
+| `/api/setup`                                       | POST   | ❌   | 5/min  | 首次设置                     |
+| [/api/time](#获取服务端时间)                       | GET    | ❌   | -      | 获取 Worker Unix 毫秒时间    |
+| [/api/secrets](#获取所有密钥)                      | GET    | ✅   | -      | 获取所有密钥                 |
+| [/api/secrets](#添加新密钥)                        | POST   | ✅   | -      | 添加新密钥                   |
+| [/api/secrets/{id}](#更新密钥)                     | PUT    | ✅   | -      | 更新指定密钥                 |
+| [/api/secrets/{id}](#删除密钥)                     | DELETE | ✅   | 10/min | 删除指定密钥                 |
+| [/api/secrets/{id}/counter](#递增-hotp-计数器)     | POST   | ✅   | -      | 递增 HOTP 计数器             |
+| [/api/secrets/counters/compact](#压实-hotp-计数器) | POST   | ✅   | -      | 回滚前压实 HOTP 计数器       |
+| [/api/secrets/batch](#批量添加密钥)                | POST   | ✅   | 20/5m  | 批量添加密钥                 |
+| [/api/secrets/export](#批量导出密钥)               | POST   | ✅   | 10/min | 导出标准 TXT/JSON/CSV/HTML   |
+| [/api/backup](#手动触发备份)                       | POST   | ✅   | 10/min | 手动触发备份                 |
+| [/api/backup](#获取备份列表)                       | GET    | ✅   | -      | 获取备份列表                 |
+| [/api/backup/export/{backupKey}](#导出备份)        | GET    | ✅   | -      | 导出指定备份                 |
+| [/api/backup/restore](#恢复备份)                   | POST   | ✅   | -      | 恢复或预览指定备份           |
+| `/api/change-password`                             | POST   | ✅   | 10/min | 修改密码                     |
+| `/api/settings`                                    | GET    | ✅   | -      | 获取系统设置                 |
+| `/api/settings`                                    | POST   | ✅   | 10/min | 保存系统设置                 |
+| `/api/webdav/config`                               | GET    | ✅   | -      | 获取 WebDAV 目标             |
+| `/api/webdav/config`                               | POST   | ✅   | 10/min | 新增或更新 WebDAV 目标       |
+| `/api/webdav/config?id={id}`                       | DELETE | ✅   | 10/min | 删除 WebDAV 目标             |
+| `/api/webdav/test`                                 | POST   | ✅   | 10/min | 测试 WebDAV 连接和写入       |
+| `/api/webdav/toggle`                               | POST   | ✅   | 10/min | 启用或禁用 WebDAV 目标       |
+| `/api/s3/config`                                   | GET    | ✅   | -      | 获取 S3 目标                 |
+| `/api/s3/config`                                   | POST   | ✅   | 10/min | 新增或更新 S3 目标           |
+| `/api/s3/config?id={id}`                           | DELETE | ✅   | 10/min | 删除 S3 目标                 |
+| `/api/s3/test`                                     | POST   | ✅   | 10/min | 测试 S3 连接和写入           |
+| `/api/s3/toggle`                                   | POST   | ✅   | 10/min | 启用或禁用 S3 目标           |
+| `/api/onedrive/config`                             | GET    | ✅   | -      | 获取 OneDrive 目标           |
+| `/api/onedrive/config`                             | POST   | ✅   | 10/min | 保存 OneDrive 目标           |
+| `/api/onedrive/config?id={id}`                     | DELETE | ✅   | 10/min | 删除 OneDrive 目标           |
+| `/api/onedrive/toggle`                             | POST   | ✅   | 10/min | 启用或禁用 OneDrive 目标     |
+| `/api/onedrive/oauth/start`                        | POST   | ✅   | 10/min | 启动 OneDrive OAuth          |
+| `/api/onedrive/oauth/callback`                     | GET    | ❌   | -      | OneDrive OAuth 回调          |
+| `/api/gdrive/config`                               | GET    | ✅   | -      | 获取 Google Drive 目标       |
+| `/api/gdrive/config`                               | POST   | ✅   | 10/min | 保存 Google Drive 目标       |
+| `/api/gdrive/config?id={id}`                       | DELETE | ✅   | 10/min | 删除 Google Drive 目标       |
+| `/api/gdrive/toggle`                               | POST   | ✅   | 10/min | 启用或禁用 Google Drive 目标 |
+| `/api/gdrive/oauth/start`                          | POST   | ✅   | 10/min | 启动 Google Drive OAuth      |
+| `/api/gdrive/oauth/callback`                       | GET    | ❌   | -      | Google Drive OAuth 回调      |
+| [/api/login](#获取认证-token)                      | POST   | ❌   | 5/min  | 用户登录                     |
+| [/api/logout](#退出登录)                           | POST   | ❌   | 10/min | 退出登录（清除 Cookie）      |
+| [/api/refresh-token](#token-刷新)                  | POST   | ✅   | -      | 刷新 Token                   |
+| [/otp/{secret}](#生成-otp)                         | GET    | ❌   | -      | 公开 OTP 生成                |
 
 ---
 
 ## 密钥管理 API
+
+同时到达的新增、编辑、删除、批量导入、HOTP 计数器递增和恢复备份按到达顺序依次执行，每个请求都基于前一个请求保存后的数据，不会互相覆盖。
 
 ### 获取所有密钥
 
@@ -170,6 +224,9 @@ Cookie: auth_token=<JWT_TOKEN>
 | `name` | String | 服务名称（如 "GitHub"） |
 | `account` | String | 账户名称（可选） |
 | `secret` | String | Base32 编码的密钥 |
+| `type` / `digits` / `period` / `algorithm` | String / Number / Number / String | OTP 参数，见[添加新密钥](#添加新密钥) |
+| `counter` | Number | 仅 HOTP。返回的是叠加 sidecar 后的**有效计数器**，见[递增 HOTP 计数器](#递增-hotp-计数器) |
+| `hotpCounterNamespace` | String (UUID) | 仅 HOTP，可选。编辑时变更了密钥、位数或算法后由服务端生成，用于隔离不同生成参数的计数器；客户端只需原样透传 |
 
 ---
 
@@ -225,15 +282,26 @@ Cookie: auth_token=<JWT_TOKEN>
 }
 ```
 
-**409 Conflict** - 密钥已存在:
+**409 Conflict** - 密钥已存在。服务名称、账户和密钥都相同才算重复，密钥比较时忽略空白和大小写:
 
 ```json
 {
-	"error": "密钥已存在",
-	"message": "相同服务名称和账户的密钥已存在",
+	"error": "ConflictError",
+	"message": "服务\"GitHub\" (账户: user@example.com) 已存在",
+	"statusCode": 409,
+	"details": {
+		"operation": "addSecret",
+		"name": "GitHub",
+		"account": "user@example.com",
+		"identical": true
+	},
 	"timestamp": "2025-10-24T10:30:00.000Z"
 }
 ```
+
+- `details.identical` 为 `true`，表示现有记录与请求的 OTP 参数一致，生成的验证码相同。比较类型、位数和算法；TOTP 另比较周期，HOTP 不比较计数器。客户端重放一次已成功的添加（例如离线队列）时，可以把这种 409 视为已完成。
+- `details.identical` 为 `false`，表示已有同名、同账户、同密钥的记录，但参数不同。此时请求没有生效，客户端不能视为已完成。
+- 请求中的类型和算法会先转为大写，省略的字段取缺省值（TOTP、6 位、30 秒、SHA1）。现有记录按网页端的规则读取：缺失、空串或 0 视为缺省值，`sha-256` 等同 `SHA256`，网页端无法使用的值（例如位数 `"abc"`）视为不一致。
 
 **Base32 验证规则**:
 
@@ -254,9 +322,18 @@ Cookie: auth_token=<JWT_TOKEN>
 
 **URL 参数**:
 
-- `id` (UUID): 密钥的唯一标识符
+- `id` (String): 密钥的唯一标识符，通常是 UUID。客户端必须用 `encodeURIComponent` 编码一次后放入路径，服务端只解码一次；含 `/`、`%`、`?`、`#` 的旧 ID 因此也能正常寻址。编码不合法时返回 400「无效路径」。ID 为 `.` 或 `..` 时会被 URL 规范化，无法寻址。
 
-**请求体**:
+**部分更新**: `name` 和 `secret` 必填。其余字段省略或为 `null` 时沿用记录当前保存的值，合并后的整条记录再按下面的规则校验，因此省略一个字段与原样提交它的现存值效果相同。
+
+- `account`、`type`、`digits`、`algorithm` 总是沿用现存值。要清空账户，请提交空字符串 `""`。
+- `period` 和 `counter` 只在类型不变时沿用：TOTP 沿用周期，HOTP 沿用周期；HOTP 的计数器只在密钥、位数、算法都未变化时沿用当前值，更换其中任一项而省略 `counter` 时从 0 开始（新参数对应新的计数序列）。切换类型时，省略的周期和计数器取添加时的缺省值 30 和 0，因为原值属于另一种类型。
+- 现存值按网页端的规则读取：类型和算法不区分大小写，`sha-256` 等同 `SHA256`；位数、周期缺失、为空串或 0 时视为未设置。记录未设置的字段取添加时的缺省值（TOTP、6 位、30 秒、SHA1、计数器 0）。HOTP 不使用周期，现存周期不是整数时按 30 处理。
+- 现存值不符合校验规则时（例如从备份恢复的 5 位验证码），省略该字段也会返回 400。客户端需要提交一个受支持的值。
+
+**周期校验**: 请求体按「添加新密钥」的规则校验，周期只接受 30、60、120 秒。唯一的例外是：记录保存着其他周期（例如从备份恢复的 45 秒），请求的类型与记录相同并原样提交或省略这个周期时，视为保留原值，允许修改其他字段。TOTP 记录的现存周期须为正整数；HOTP 不使用周期，原样提交时现存周期为任意整数（包括 0）都可以保留。把周期改成另一个非标准值，或在保留非标准周期的同时切换类型，仍会被拒绝。
+
+**请求体**（只修改名称、账户和密钥，其他参数保持不变）:
 
 ```json
 {
@@ -283,12 +360,41 @@ Cookie: auth_token=<JWT_TOKEN>
 
 **错误响应**:
 
+**400 Bad Request** - 路径中的 ID 编码不合法（删除和递增计数器接口相同）:
+
+```json
+{
+	"error": "无效路径",
+	"message": "路径中的密钥ID编码无效",
+	"timestamp": "2025-10-24T10:30:00.000Z"
+}
+```
+
 **404 Not Found** - 密钥不存在:
 
 ```json
 {
 	"error": "密钥不存在",
 	"message": "找不到指定的密钥",
+	"timestamp": "2025-10-24T10:30:00.000Z"
+}
+```
+
+**409 Conflict** - HOTP 计数器不能通过编辑降低：
+
+当密钥、位数、算法都未变化时，请求体中的 `counter` 不能低于服务端当前有效值（计数器只允许通过[递增接口](#递增-hotp-计数器)前进）。客户端应重新拉取密钥列表后再提交编辑。需要把计数器归零时，请删除后重新添加，或同时更换密钥。
+
+```json
+{
+	"error": "ConflictError",
+	"message": "HOTP计数器已推进，不能通过编辑操作降低计数器",
+	"statusCode": 409,
+	"details": {
+		"operation": "updateSecret",
+		"secretId": "550e8400-e29b-41d4-a716-446655440000",
+		"requestedCounter": 3,
+		"currentCounter": 12
+	},
 	"timestamp": "2025-10-24T10:30:00.000Z"
 }
 ```
@@ -305,7 +411,7 @@ Cookie: auth_token=<JWT_TOKEN>
 
 **URL 参数**:
 
-- `id` (UUID): 密钥的唯一标识符
+- `id` (String): 密钥的唯一标识符，编码约定与[更新密钥](#更新密钥)相同
 
 **成功响应** (200 OK):
 
@@ -330,6 +436,124 @@ Cookie: auth_token=<JWT_TOKEN>
 	"timestamp": "2025-10-24T10:30:00.000Z"
 }
 ```
+
+---
+
+### 递增 HOTP 计数器
+
+**端点**: `POST /api/secrets/{id}/counter`
+
+**认证**: ✅ 需要
+
+**描述**: 将指定 HOTP 密钥的计数器加 1。请求体携带客户端当前看到的生成参数快照，服务端逐项比对通过后才递增；任何一项不一致都返回 409，客户端应重新拉取密钥列表后重试，不要盲目重发。
+
+自 1.8.0 起，递增结果写入独立的 KV 键 `hotp-counter:{epoch}:{id}[:{namespace}]`（下称 sidecar），不再改写加密主文档 `secrets`。`GET /api/secrets` 返回的 `counter` 已经是叠加 sidecar 后的有效值；编辑、备份、云盘推送等所有读路径同样使用有效值。回滚到 1.8.0 之前的版本前必须先执行[压实](#压实-hotp-计数器)。
+
+**URL 参数**:
+
+- `id` (String): 密钥的唯一标识符，编码约定与[更新密钥](#更新密钥)相同
+
+**请求体**:
+
+```json
+{
+	"expectedNamespace": null,
+	"expectedCounter": 5,
+	"expectedSecret": "JBSWY3DPEHPK3PXP",
+	"expectedDigits": 6,
+	"expectedAlgorithm": "SHA1"
+}
+```
+
+| 字段                | 类型           | 必填 | 说明                                                                |
+| ------------------- | -------------- | ---- | ------------------------------------------------------------------- |
+| `expectedNamespace` | String \| null | 否   | 密钥对象的 `hotpCounterNamespace`；密钥没有该字段时传 `null` 或省略 |
+| `expectedCounter`   | Number         | 是   | 客户端当前看到的计数器值（非负安全整数）                            |
+| `expectedSecret`    | String         | 是   | Base32 密钥                                                         |
+| `expectedDigits`    | Number         | 是   | `6` 或 `8`                                                          |
+| `expectedAlgorithm` | String         | 是   | `SHA1` / `SHA256` / `SHA512`                                        |
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "HOTP计数器递增成功",
+	"data": {
+		"secret": {
+			"id": "550e8400-e29b-41d4-a716-446655440000",
+			"name": "GitHub",
+			"account": "user@example.com",
+			"secret": "JBSWY3DPEHPK3PXP",
+			"type": "HOTP",
+			"digits": 6,
+			"period": 30,
+			"algorithm": "SHA1",
+			"counter": 6
+		},
+		"id": "550e8400-e29b-41d4-a716-446655440000",
+		"counter": 6,
+		"idempotent": false
+	}
+}
+```
+
+**错误响应**:
+
+| 状态码 | `message`                                    | 说明                                                                                 |
+| ------ | -------------------------------------------- | ------------------------------------------------------------------------------------ |
+| 400    | 字段校验信息                                 | 请求体缺字段或类型错误                                                               |
+| 400    | `路径中的密钥ID编码无效`                     | 路径中的 `id` 不是合法的百分号编码                                                   |
+| 404    | 密钥不存在                                   | `id` 不存在                                                                          |
+| 409    | `只有HOTP密钥可以递增计数器`                 | 目标不是 HOTP 密钥                                                                   |
+| 409    | `HOTP生成参数已变更，请刷新后重试`           | 密钥、位数、算法或 namespace 与服务端不一致，`details.currentCounter` 为服务端当前值 |
+| 409    | `HOTP计数器已变更，请刷新后重试`             | 计数器已被其他设备推进，`details` 含 `expectedCounter` 与 `currentCounter`           |
+| 409    | `HOTP计数器已达到安全整数上限，无法继续递增` | 计数器已是 `Number.MAX_SAFE_INTEGER`                                                 |
+| 500    | `HOTP计数器递增失败`                         | sidecar 无法解密或 KV 异常。此时不会写入任何数据                                     |
+
+**并发说明**: Workers KV 没有原子比较写入。两台设备在同一秒对同一密钥发起递增时，可能都通过快照比对并得到同一个新值。这是 HOTP 在 KV 上的固有限制，客户端应在 409 或对账发现不一致后刷新列表。
+
+---
+
+### 压实 HOTP 计数器
+
+**端点**: `POST /api/secrets/counters/compact`
+
+**认证**: ✅ 需要
+
+**描述**: 维护接口。把所有 HOTP 密钥的有效计数器写回加密主文档 `secrets`，然后轮换 sidecar 纪元（KV 键 `hotp-counter-epoch`），使旧 sidecar 全部失效。
+
+**什么时候需要调用**: 回滚到 1.8.0 之前的版本之前。旧版本只读主文档，不认识 sidecar；不压实就回滚，HOTP 计数器会退回到升级 1.8.0 时的值，之后生成的验证码会被服务方判定为已使用。没有 HOTP 密钥的部署无需调用。正常升级、日常使用都不需要调用。
+
+**请求头**:
+
+```http
+X-Confirm-Maintenance: compact-hotp-counters
+```
+
+缺少该头时返回 400，避免误触。
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "HOTP计数器压实成功",
+	"data": {
+		"compactedCount": 3,
+		"secretCount": 12
+	}
+}
+```
+
+`compactedCount` 为 HOTP 密钥数，`secretCount` 为全部密钥数。
+
+**注意事项**:
+
+- 主文档写入与纪元轮换是两步 KV 操作，不是原子的。若返回 500，直接重试即可：轮换成功前旧 sidecar 仍然有效，不会丢计数器。
+- 压实过程中请勿在其他设备复制 HOTP 验证码，否则该次递增可能落在即将失效的旧纪元里。
+- 该操作不触发事件备份，但会记录数据哈希，定时备份按正常规则处理。
+- 旧纪元的 sidecar 键不会被删除，只是不再被读取。
 
 ---
 
@@ -416,6 +640,101 @@ Cookie: auth_token=<JWT_TOKEN>
 	"message": "批量添加完成：成功 2 个，失败 1 个"
 }
 ```
+
+---
+
+### 批量导出密钥
+
+**端点**: `POST /api/secrets/export`
+
+**认证**: ✅ 需要
+**描述**: 导出标准 TXT、JSON、CSV、HTML 格式的密钥文件。该接口主要供网页端批量导出功能调用，也可以在携带认证 Cookie 的情况下直接使用。
+
+**请求体**:
+
+```json
+{
+	"format": "json",
+	"filenamePrefix": "2FA-secrets",
+	"metadata": {
+		"source": "export"
+	},
+	"secrets": [
+		{
+			"id": "550e8400-e29b-41d4-a716-446655440000",
+			"name": "GitHub",
+			"account": "user@example.com",
+			"secret": "JBSWY3DPEHPK3PXP",
+			"type": "TOTP",
+			"digits": 6,
+			"period": 30,
+			"algorithm": "SHA1",
+			"counter": 0,
+			"createdAt": "2026-04-16T00:00:00.000Z"
+		}
+	]
+}
+```
+
+**字段说明**:
+
+| 字段             | 类型   | 必填 | 说明                                        |
+| ---------------- | ------ | ---- | ------------------------------------------- |
+| `format`         | String | ✅   | 导出格式，支持 `txt`、`json`、`csv`、`html` |
+| `filenamePrefix` | String | ❌   | 下载文件名前缀                              |
+| `metadata`       | Object | ❌   | 附加元数据，仅写入导出文件内容              |
+| `secrets`        | Array  | ✅   | 待导出的密钥数组                            |
+
+**成功响应** (200 OK):
+
+返回文件下载流，响应头示例：
+
+```http
+Content-Type: application/json;charset=utf-8
+Content-Disposition: attachment; filename="2FA-secrets-data-2026-04-17.json"
+```
+
+**错误响应**:
+
+**400 Bad Request** - 参数错误、无效 profile、空导出或密钥数据无效:
+
+```json
+{
+	"error": "请求验证失败",
+	"message": "请提供密钥数组",
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**413 Payload Too Large** - 请求体超过 2 MB:
+
+```json
+{
+	"error": "导出请求过大",
+	"message": "单次导出请求体不能超过 2 MB（当前约 2.1 MB）",
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**429 Too Many Requests** - 触发敏感操作限流:
+
+```json
+{
+	"error": "请求过于频繁",
+	"message": "您的请求次数过多，请在 60 秒后重试",
+	"retryAfter": 60,
+	"limit": 10,
+	"remaining": 0,
+	"resetAt": "2026-04-17T10:31:00.000Z",
+	"algorithm": "sliding-window"
+}
+```
+
+**限制说明**:
+
+- 该接口使用敏感操作限流：`10 次 / 1 分钟`
+- 单次请求体最大 `2 MB`
+- HTML 导出在密钥数量较大时会降级为仅表格、不嵌入二维码的可恢复文件
 
 ---
 
@@ -580,60 +899,87 @@ GitHub,user@example.com,JBSWY3DPEHPK3PXP,TOTP,6,30,SHA1
 
 ---
 
-## OTP 生成 API
+## 时间校准 API
 
-### 生成 OTP
+### 获取服务端时间
 
-**端点**: `POST /api/generate-otp`
+**端点**: `GET /api/time`
 
-**认证**: ✅ 需要
+**认证**: ❌ 不需要
 
-**描述**: 根据密钥生成一次性密码（OTP）
-
-**请求体**:
-
-```json
-{
-	"secret": "JBSWY3DPEHPK3PXP",
-	"type": "totp",
-	"options": {
-		"timeStep": 30,
-		"digits": 6,
-		"algorithm": "SHA1"
-	}
-}
-```
-
-**字段说明**:
-| 字段 | 类型 | 必填 | 默认值 | 说明 |
-|------|------|------|--------|------|
-| `secret` | String | ✅ | - | Base32 编码的密钥 |
-| `type` | String | ❌ | `"totp"` | OTP 类型: `totp`, `hotp` |
-| `options.timeStep` | Number | ❌ | `30` | TOTP 时间步长（秒） |
-| `options.digits` | Number | ❌ | `6` | OTP 位数（6 或 8） |
-| `options.algorithm` | String | ❌ | `"SHA1"` | 哈希算法: `SHA1`, `SHA256`, `SHA512` |
-| `options.counter` | Number | ❌ | - | HOTP 计数器（仅 HOTP 需要） |
+**描述**: 返回 Worker 当前的 Unix 毫秒时间，供客户端修正 TOTP 计算时钟。响应禁止缓存，不包含密钥或 OTP 数据。
 
 **成功响应** (200 OK):
 
 ```json
 {
-	"otp": "123456",
-	"timeRemaining": 25,
-	"timestamp": "2025-10-24T10:30:00.000Z",
-	"type": "totp",
-	"nextOtp": "654321"
+	"serverTimeMs": 1786248000123
 }
 ```
 
-**响应字段说明**:
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `otp` | String | 当前 OTP（6 位数字） |
-| `timeRemaining` | Number | 当前 OTP 剩余有效时间（秒） |
-| `timestamp` | String | 服务器时间戳 |
-| `type` | String | OTP 类型 |
-| `nextOtp` | String | 下一个时段的 OTP（仅 TOTP） |
+---
+
+## OTP 生成 API
+
+### 生成 OTP
+
+**端点**: `GET /otp/{secret}`
+
+**认证**: ❌ 不需要
+
+**描述**: 公开 OTP 生成接口。默认返回 HTML 页面；当 `format=json` 时返回 JSON。
+
+**URL 参数**:
+
+- `secret` (String): Base32 编码的密钥
+
+**查询参数** (可选):
+
+- `type` (String): OTP 类型 (`totp`, `hotp`)，默认 `TOTP`
+- `digits` (Number): OTP 位数，支持 `6`、`8`，默认 `6`
+- `period` (Number): TOTP 时间步长（秒），支持 `30`、`60`、`120`，默认 `30`
+- `algorithm` (String): 哈希算法，支持 `SHA1`、`SHA256`、`SHA512`
+- `counter` (Number): HOTP 计数器（仅 `HOTP` 使用）
+- `format` (String): `html` 或 `json`，默认 `html`
+- `preview` (String): 显式设为 `1` 时，TOTP JSON 响应包含后续两个周期的验证码和时间信息；HOTP 忽略此参数
+
+**请求示例**:
+
+```http
+GET /otp/JBSWY3DPEHPK3PXP?type=totp&digits=6&period=30&format=json HTTP/1.1
+Host: 2fa.example.com
+```
+
+**成功响应** (`format=json`, 200 OK):
+
+```json
+{
+	"token": "123456"
+}
+```
+
+**成功响应** (`format=html`, 200 OK):
+
+- 返回可直接展示的 OTP HTML 页面
+- TOTP 页面显示当前、下一周期验证码和剩余有效时间，并自动更新
+- HOTP 页面只显示指定计数器的当前验证码，不显示倒计时、不自动递增计数器
+
+**TOTP 预览响应** (`format=json&preview=1`, 200 OK):
+
+```json
+{
+	"token": "123456",
+	"nextToken": "654321",
+	"followingToken": "789012",
+	"period": 30,
+	"validUntil": 1800000030000,
+	"serverTime": 1800000015000
+}
+```
+
+`validUntil` 为当前验证码所属周期的结束时间，`serverTime` 为验证码生成结束时的服务器时间，二者均为 Unix 毫秒。三个验证码使用同一个时间基准生成；如果生成期间跨过周期边界，`validUntil` 可能已经过去，客户端应按时间判断有效性。`nextToken` 仅在下一周期生效；`followingToken` 在再下一个周期生效，用于周期交接时补上新的下期码，页面不单独显示第三个验证码。
+
+不带 `preview=1` 的 JSON 请求，以及所有 HOTP JSON 请求，仍只返回 `{ "token": "…" }`。OTP JSON 响应使用 `Cache-Control: no-store`。
 
 **错误响应**:
 
@@ -649,46 +995,6 @@ GitHub,user@example.com,JBSWY3DPEHPK3PXP,TOTP,6,30,SHA1
 
 ---
 
-### 传统 OTP 生成
-
-**端点**: `GET /otp/{secret}`
-
-**认证**: ❌ 不需要
-
-**描述**: 简化的 OTP 生成端点（向后兼容旧版本）
-
-**URL 参数**:
-
-- `secret` (String): Base32 编码的密钥
-
-**查询参数** (可选):
-
-- `type` (String): OTP 类型 (`totp`, `hotp`)，默认 `totp`
-- `timeStep` (Number): TOTP 时间步长（秒），默认 `30`
-- `digits` (Number): OTP 位数，默认 `6`
-- `counter` (Number): HOTP 计数器（仅 HOTP）
-
-**请求示例**:
-
-```http
-GET /otp/JBSWY3DPEHPK3PXP?type=totp&digits=6 HTTP/1.1
-Host: 2fa.example.com
-```
-
-**成功响应** (200 OK):
-
-```json
-{
-	"otp": "123456",
-	"timeRemaining": 25,
-	"timestamp": "2025-10-24T10:30:00.000Z",
-	"type": "totp",
-	"nextOtp": "654321"
-}
-```
-
----
-
 ## 备份管理 API
 
 ### 手动触发备份
@@ -697,20 +1003,21 @@ Host: 2fa.example.com
 
 **认证**: ✅ 需要
 
-**描述**: 立即触发一次完整备份
+**描述**: 立即触发一次备份。生成的备份文件扩展名会跟随「默认导出格式」设置（`txt` / `json` / `csv` / `html`）。
+
+保存到 KV 和远程存储的 CSV 备份始终使用简体中文表头，不随界面语言变化，与自动备份、定时备份一致，旧版本和外部脚本也能解析。HTML 备份的页面文案跟随请求语言，恢复时读取其中内嵌的数据。下载导出接口仍按请求语言生成表头。
 
 **成功响应** (200 OK):
 
 ```json
 {
 	"success": true,
-	"data": {
-		"backupId": "backup_1729765800000",
-		"timestamp": "2025-10-24T10:30:00.000Z",
-		"count": 15,
-		"encrypted": true
-	},
-	"message": "备份成功"
+	"message": "备份完成，共备份 15 个密钥",
+	"backupKey": "backup_2026-04-17_06-05-18-599-us85.txt",
+	"count": 15,
+	"timestamp": "2026-04-17T06:05:18.599Z",
+	"encrypted": true,
+	"format": "txt"
 }
 ```
 
@@ -718,7 +1025,7 @@ Host: 2fa.example.com
 
 ### 获取备份列表
 
-**端点**: `GET /api/backups`
+**端点**: `GET /api/backup`
 
 **认证**: ✅ 需要
 
@@ -729,25 +1036,35 @@ Host: 2fa.example.com
 ```json
 {
 	"success": true,
-	"data": [
+	"backups": [
 		{
-			"id": "backup_1729765800000",
-			"timestamp": "2025-10-24T10:30:00.000Z",
+			"key": "backup_2026-04-17_06-05-18-599-us85.txt",
+			"created": "2026-04-17T06:05:18.599Z",
 			"count": 15,
 			"encrypted": true,
-			"reason": "manual",
-			"size": "2.5 KB"
+			"format": "txt",
+			"partial": false,
+			"skippedInvalidCount": 0,
+			"size": 2048
 		},
 		{
-			"id": "backup_1729765500000",
-			"timestamp": "2025-10-24T10:25:00.000Z",
+			"key": "backup_2026-04-17_06-05-18-552-n8b1.html",
+			"created": "2026-04-17T06:05:18.552Z",
 			"count": 15,
 			"encrypted": true,
-			"reason": "event-driven",
-			"size": "2.5 KB"
+			"format": "html",
+			"partial": false,
+			"skippedInvalidCount": 0,
+			"size": 8192
 		}
 	],
-	"total": 2
+	"count": 2,
+	"pagination": {
+		"limit": 50,
+		"hasMore": false,
+		"cursor": null,
+		"loadedAll": false
+	}
 }
 ```
 
@@ -755,36 +1072,22 @@ Host: 2fa.example.com
 
 ### 导出备份
 
-**端点**: `GET /api/backups/export/{id}`
+**端点**: `GET /api/backup/export/{backupKey}?format={format}`
 
 **认证**: ✅ 需要
 
-**描述**: 导出指定备份为 JSON 文件
+**描述**: 将指定备份导出为目标格式文件。支持 `txt`、`json`、`csv`、`html` 四种格式。
 
 **URL 参数**:
 
-- `id` (String): 备份 ID（如 `backup_1729765800000`）
+- `backupKey` (String): 备份文件名（如 `backup_2026-04-17_06-05-18-599-us85.txt`）
+- `format` (String，可选): 导出格式，默认 `txt`
 
-**成功响应** (200 OK):
+**成功响应** (200 OK): 返回下载文件，响应头示例：
 
-```json
-{
-	"id": "backup_1729765800000",
-	"timestamp": "2025-10-24T10:30:00.000Z",
-	"count": 15,
-	"reason": "manual",
-	"encrypted": true,
-	"data": [
-		{
-			"id": "550e8400-e29b-41d4-a716-446655440000",
-			"name": "GitHub",
-			"account": "user@example.com",
-			"secret": "JBSWY3DPEHPK3PXP",
-			"createdAt": "2025-10-20T10:30:00.000Z",
-			"updatedAt": "2025-10-20T10:30:00.000Z"
-		}
-	]
-}
+```http
+Content-Type: text/plain;charset=utf-8
+Content-Disposition: attachment; filename="2FA-backup-2026-04-17.txt"
 ```
 
 **错误响应**:
@@ -809,31 +1112,125 @@ Host: 2fa.example.com
 }
 ```
 
+**400 Bad Request** - 备份不完整：创建备份时已跳过条目，或含结构损坏的条目，判定规则见下方「恢复备份」的条目校验。OTP 参数不受支持的条目会原样导出，不会导致 400。`message` 是汇总；`warnings` 只含逐条原因，仅在解析时有条目被跳过才出现，见「恢复备份」的警告字段:
+
+```json
+{
+	"error": "备份不完整",
+	"message": "该备份在创建或解析时已跳过 1 条无效密钥，无法保证数据完整，已阻止导出",
+	"timestamp": "2025-10-24T10:30:00.000Z"
+}
+```
+
 ---
 
 ### 恢复备份
 
-**端点**: `POST /api/backups/restore/{id}`
+**端点**: `POST /api/backup/restore`
 
 **认证**: ✅ 需要
 
 **描述**: 从指定备份恢复数据（会覆盖当前数据）
 
-**URL 参数**:
+**条目校验**: 解析备份时逐条检查，规则与网页端 `isUsableSecretRecord()` 一致。KV 中的备份（包括导出备份和备份列表）与上传的文件（明文或 `v1:` 加密）规则相同。加密文件只有用本实例的 `ENCRYPTION_KEY` 解密成功才会读取条目；无法解密时返回 500「解密失败」，不会恢复任何数据。
 
-- `id` (String): 备份 ID
+- **缺省值**: 位数、周期为 0、空串、`null` 或缺失时按 6 和 30 处理；类型缺省为 TOTP，算法缺省为 SHA1（不区分大小写和连字符，`sha-256` 保存为 `SHA256`）。恢复时写入这些缺省值，各备份格式结果一致。
+- **结构检查**: 密钥必须是有效的 Base32，且去掉末尾 `=` 后至少 2 个字符；名称不能为空；`account` 必须是字符串。不合格的条目被跳过，计入 `skippedInvalidCount`。
+- **OTP 参数检查**: 类型只能是 TOTP 或 HOTP，位数只能是 6 或 8，算法只能是 SHA1、SHA256 或 SHA512，TOTP 周期须为正整数，HOTP 计数器须为非负安全整数。名称长度和非标准周期（例如 45 秒）不受限制；不适用于该类型的字段（TOTP 的计数器、HOTP 的周期）不检查。不符合的条目**原样保留并恢复**，不计入 `skippedInvalidCount`，也不会让备份变为不完整；网页端会逐条隐藏这些记录并提示。预览用 `data.unsupportedCount` 和 `data.unsupportedWarnings` 列出它们，恢复成功的响应带 `unsupportedCount`。
+
+只要有条目被跳过（包括创建备份时已跳过的），预览会返回 `partial: true`，恢复与导出返回 400「备份不完整」，不会覆盖当前数据。
+
+**警告字段**:
+
+| 响应                         | 字段                       | 内容                                                                                       |
+| ---------------------------- | -------------------------- | ------------------------------------------------------------------------------------------ |
+| 预览                         | `data.warnings`            | 有条目被跳过时，第 1 项是汇总，其后是解析时被跳过条目的逐条原因；没有跳过时为 `[]`         |
+| 预览                         | `data.unsupportedCount`    | 参数不受支持但已保留的条目数，没有时为 `0`                                                 |
+| 预览                         | `data.unsupportedWarnings` | 这些条目的逐条原因，不含汇总；没有时为 `[]`                                                |
+| 恢复成功                     | `unsupportedCount`         | 同预览的 `data.unsupportedCount`                                                           |
+| 恢复、导出 400「备份不完整」 | `message`                  | 汇总，带跳过条数                                                                           |
+| 恢复、导出 400「备份不完整」 | `warnings`                 | 只含逐条原因，不含汇总。仅在解析时有条目被跳过才出现；只在创建备份时跳过过条目则省略该字段 |
+
+- 逐条原因的格式为「第 N 条（服务名）：原因」，同一条目有多个原因时用「；」连接，英文为 `Entry N (name): reason; reason`。服务名为空的条目显示为「未命名」（英文 `Untitled`）。条目按在备份中出现的顺序从 1 编号。
+- 每个列表最多 10 行。超过 10 条时列出前 9 条，第 10 行为「另有 N 条」（英文 `N more entries`）。
+- 汇总和原因都按请求语言返回。
+
+**ID**: 字符串 ID 原样保留，旧的数字 ID 保存为对应的字符串（例如 `7` 保存为 `"7"`）。只有缺失、含不安全字符（空白、引号、`<`、`>`、`&`、反斜杠）或重复的 ID 会被替换为新 UUID，重复按字符串比较。
+
+**请求体**:
+
+KV 备份恢复:
+
+```json
+{
+	"backupKey": "backup_2026-04-17_06-05-18-599-us85.txt",
+	"preview": false
+}
+```
+
+- `backupKey`: KV 中的备份文件名
+- `preview`: `true` 时仅返回预览，不执行恢复
+
+上传备份文件恢复（适用于从 WebDAV/S3/OneDrive/Google Drive 下载的远程备份）:
+
+```json
+{
+	"backupFileName": "backup_2026-04-17_06-05-18-599-us85.txt",
+	"backupContent": "v1:base64iv:base64ciphertext",
+	"preview": true
+}
+```
+
+- `backupFileName`: 上传文件名，必须为 `backup_*.(txt|json|csv|html)`
+- `backupContent`: 上传文件原始文本内容，可为明文备份或 `v1:` 加密备份
+- `preview`: `true` 时仅返回预览，不执行恢复
 
 **成功响应** (200 OK):
 
 ```json
 {
 	"success": true,
+	"message": "恢复备份成功，共恢复 15 个密钥",
+	"backupKey": "backup_2026-04-17_06-05-18-599-us85.txt",
+	"count": 15,
+	"timestamp": "2026-04-17T06:05:18.599Z",
+	"sourceEncrypted": true,
+	"format": "txt",
+	"source": "kv",
+	"unsupportedCount": 1
+}
+```
+
+**预览响应** (`preview: true`):
+
+```json
+{
+	"success": true,
 	"data": {
-		"backupId": "backup_1729765800000",
+		"message": "备份预览获取成功",
+		"backupKey": "backup_2026-04-17_06-05-18-599-us85.txt",
 		"count": 15,
-		"restored": 15
-	},
-	"message": "备份恢复成功"
+		"timestamp": "2026-04-17T06:05:18.599Z",
+		"encrypted": true,
+		"format": "txt",
+		"source": "kv",
+		"partial": false,
+		"skippedInvalidCount": 0,
+		"warnings": [],
+		"unsupportedCount": 1,
+		"unsupportedWarnings": ["第 2 条（GitHub）：验证码位数仅支持6位或8位"],
+		"secrets": []
+	}
+}
+```
+
+有条目被跳过时，预览仍返回 200，`partial` 为 `true`，`data.warnings` 以汇总开头:
+
+```json
+{
+	"partial": true,
+	"skippedInvalidCount": 1,
+	"warnings": ["该备份在创建或解析时已跳过 1 条无效密钥，无法保证数据完整，已阻止恢复或导出", "第 3 条（Short）：缺少有效密钥"]
 }
 ```
 
@@ -859,6 +1256,600 @@ Host: 2fa.example.com
 }
 ```
 
+**400 Bad Request** - 备份不完整（例如第 3 条的密钥去掉填充后只剩 1 个字符）。`message` 是汇总，`warnings` 只含逐条原因；预览时同样的逐条原因出现在 `data.warnings[0]` 之后:
+
+```json
+{
+	"error": "备份不完整",
+	"message": "该备份在创建或解析时已跳过 1 条无效密钥，无法保证数据完整，已阻止恢复",
+	"warnings": ["第 3 条（Short）：缺少有效密钥"],
+	"timestamp": "2025-10-24T10:30:00.000Z"
+}
+```
+
+---
+
+## WebDAV 与 S3 同步 API
+
+两类服务均支持多个备份目标，所有端点都需要认证。配置存储在 KV；配置了 `ENCRYPTION_KEY` 时加密保存，否则保存响应会返回 `encrypted: false` 和 `warning`。
+
+### 获取 WebDAV 或 S3 目标列表
+
+**端点**: `GET /api/webdav/config` 或 `GET /api/s3/config`
+
+**WebDAV 成功响应** (200 OK):
+
+```json
+{
+	"destinations": [
+		{
+			"id": "550e8400-e29b-41d4-a716-446655440000",
+			"name": "WebDAV 备份",
+			"enabled": true,
+			"config": {
+				"url": "https://dav.example.com",
+				"username": "backup-user",
+				"password": "",
+				"hasPassword": true,
+				"path": "/2FA-Backups"
+			},
+			"status": { "lastSuccess": null, "lastError": null },
+			"createdAt": "2026-09-16T00:00:00.000Z"
+		}
+	],
+	"count": 1,
+	"maxAllowed": 5
+}
+```
+
+S3 返回相同的外层结构，各目标的 `config` 为：
+
+```json
+{
+	"endpoint": "https://s3.example.com",
+	"bucket": "2fa-backups",
+	"region": "auto",
+	"accessKeyId": "example-access-key",
+	"secretAccessKey": "",
+	"hasSecretKey": true,
+	"prefix": "2fa/"
+}
+```
+
+密码和 Secret Access Key 不会返回明文，客户端通过 `hasPassword` / `hasSecretKey` 判断是否已保存。`status` 为最近备份推送结果；`maxAllowed: 5` 用于界面提示，当前 WebDAV/S3 保存 API 未强制校验目标数量上限。
+
+### 保存 WebDAV 目标
+
+**端点**: `POST /api/webdav/config`
+
+**请求体**:
+
+```json
+{
+	"name": "WebDAV 备份",
+	"url": "https://dav.example.com",
+	"username": "backup-user",
+	"password": "example-app-password",
+	"path": "/2FA-Backups"
+}
+```
+
+- 新增时省略 `id`；更新时附加目标 `id`，仍需提交 `name`、`url`、`username`。
+- `name` 最多 30 个字符，`url` 必须使用 HTTPS。
+- 首次保存必须提供 `password`；更新时省略或传空字符串会保留已保存的密码。
+- `path` 默认 `/`，保存时规范化为以 `/` 开头的目录路径。
+
+**成功响应** (200 OK，已配置加密密钥的示例):
+
+```json
+{
+	"success": true,
+	"message": "WebDAV 配置已保存",
+	"id": "550e8400-e29b-41d4-a716-446655440000",
+	"encrypted": true
+}
+```
+
+### 保存 S3 目标
+
+**端点**: `POST /api/s3/config`
+
+**请求体**:
+
+```json
+{
+	"name": "S3 备份",
+	"endpoint": "https://s3.example.com",
+	"bucket": "2fa-backups",
+	"region": "auto",
+	"accessKeyId": "example-access-key",
+	"secretAccessKey": "example-secret-key",
+	"prefix": "2fa/"
+}
+```
+
+- 新增时省略 `id`；更新时附加目标 `id`，仍需提交 `name`、`endpoint`、`bucket`、`accessKeyId`。
+- `name` 最多 30 个字符，`endpoint` 必须使用 HTTPS。
+- 首次保存必须提供 `secretAccessKey`；更新时省略或传空字符串会保留已保存的密钥。
+- `region` 默认 `auto`；`prefix` 默认空字符串，非空前缀会规范化为无前导 `/`、以 `/` 结尾的路径。
+- 成功响应结构与 WebDAV 相同，`message` 为 `S3 配置已保存`。
+
+两类服务的新增目标默认启用；更新配置保留原有启用状态。保存接口不执行连接测试。
+
+### 测试 WebDAV 或 S3 连接
+
+**端点**: `POST /api/webdav/test` 或 `POST /api/s3/test`
+
+请求体与对应保存接口相同，必填配置字段也相同。可以携带 `id` 并将密码或 Secret Access Key 留空，以使用该目标已保存的凭证；仅提交 `id` 不足以完成测试。测试不会保存配置，但会向远端写入测试文件，当前实现不会自动删除该文件。
+
+**WebDAV 成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "连接成功，已验证写入权限（测试文件：.2fa-webdav-test.txt）",
+	"method": "PROPFIND"
+}
+```
+
+`method` 为实际连接探测成功的方法。S3 成功响应没有 `method` 字段，`message` 中的测试文件为 `<prefix>.2fa-s3-test.txt`。连接或写入测试失败返回 400，例如：
+
+```json
+{
+	"success": false,
+	"message": "写入测试失败：没有写入权限，请检查 Access Key 权限"
+}
+```
+
+### 切换 WebDAV 或 S3 启用状态
+
+**端点**: `POST /api/webdav/toggle` 或 `POST /api/s3/toggle`
+
+**请求体**:
+
+```json
+{
+	"id": "550e8400-e29b-41d4-a716-446655440000",
+	"enabled": false
+}
+```
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "已禁用"
+}
+```
+
+`enabled` 必须为布尔值；传 `true` 时成功消息为 `已启用`。目标不存在时返回 404。
+
+### 删除 WebDAV 或 S3 目标
+
+**端点**: `DELETE /api/webdav/config?id={id}` 或 `DELETE /api/s3/config?id={id}`
+
+通过查询参数指定目标，不需要请求体。成功返回 200，例如：
+
+```json
+{
+	"success": true,
+	"message": "WebDAV 配置已删除"
+}
+```
+
+S3 的成功消息为 `S3 配置已删除`。缺少 `id` 返回 400，目标不存在返回 404。保存、删除、测试、切换接口均使用 `sensitive` 限流（10 次 / 分钟），四个接口共用一个 S3 计数，见 [Rate Limiting](#rate-limiting)。
+
+---
+
+## 云盘同步 API
+
+OneDrive 和 Google Drive 使用同一套目标管理模型:
+
+- 目标配置保存到 KV，可选使用 `ENCRYPTION_KEY` 加密
+- OAuth 授权成功后会立即执行一次自动连接测试
+- 新目标授权成功后默认保持关闭状态，需要用户手动启用
+- 已启用的目标重新授权后，会保留原有启用状态
+- 远程自动备份写入的文件扩展名跟随「默认导出格式」设置
+
+### 目标配置字段
+
+```json
+{
+	"id": "uuid",
+	"name": "工作盘",
+	"folderPath": "/2FA-Backups"
+}
+```
+
+字段说明:
+
+- `id`: 目标 ID；更新或删除现有目标时使用
+- `name`: 目标名称，最多 30 个字符
+- `folderPath`: 远程备份目录，默认为 `/2FA-Backups`
+
+### OneDrive API
+
+| 端点                           | 方法   | 认证 | 描述                                                              |
+| ------------------------------ | ------ | ---- | ----------------------------------------------------------------- |
+| `/api/onedrive/config`         | GET    | ✅   | 获取 OneDrive 目标列表、授权状态和最近推送结果                    |
+| `/api/onedrive/config`         | POST   | ✅   | 新增或更新 OneDrive 目标                                          |
+| `/api/onedrive/config?id={id}` | DELETE | ✅   | 删除指定 OneDrive 目标                                            |
+| `/api/onedrive/toggle`         | POST   | ✅   | 启用或禁用指定 OneDrive 目标                                      |
+| `/api/onedrive/oauth/start`    | POST   | ✅   | 生成授权链接并启动 OAuth                                          |
+| `/api/onedrive/oauth/callback` | GET    | ❌   | Microsoft 回调地址，返回弹窗 HTML 并通过 `postMessage` 通知主窗口 |
+
+### Google Drive API
+
+| 端点                         | 方法   | 认证 | 描述                                                           |
+| ---------------------------- | ------ | ---- | -------------------------------------------------------------- |
+| `/api/gdrive/config`         | GET    | ✅   | 获取 Google Drive 目标列表、授权状态和最近推送结果             |
+| `/api/gdrive/config`         | POST   | ✅   | 新增或更新 Google Drive 目标                                   |
+| `/api/gdrive/config?id={id}` | DELETE | ✅   | 删除指定 Google Drive 目标                                     |
+| `/api/gdrive/toggle`         | POST   | ✅   | 启用或禁用指定 Google Drive 目标                               |
+| `/api/gdrive/oauth/start`    | POST   | ✅   | 生成授权链接并启动 OAuth                                       |
+| `/api/gdrive/oauth/callback` | GET    | ❌   | Google 回调地址，返回弹窗 HTML 并通过 `postMessage` 通知主窗口 |
+
+### 保存目标
+
+**端点**: `POST /api/onedrive/config` 或 `POST /api/gdrive/config`
+
+**请求体**:
+
+```json
+{
+	"name": "工作盘",
+	"folderPath": "/2FA-Backups"
+}
+```
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"id": "550e8400-e29b-41d4-a716-446655440000",
+	"message": "配置已保存",
+	"encrypted": true,
+	"warning": null
+}
+```
+
+### 切换启用状态
+
+**端点**: `POST /api/onedrive/toggle` 或 `POST /api/gdrive/toggle`
+
+**请求体**:
+
+```json
+{
+	"id": "550e8400-e29b-41d4-a716-446655440000",
+	"enabled": true
+}
+```
+
+说明:
+
+- 未授权目标不能直接启用
+- 授权成功但连接测试失败时，目标会保持禁用
+
+### 启动 OAuth
+
+**端点**: `POST /api/onedrive/oauth/start` 或 `POST /api/gdrive/oauth/start`
+
+**请求体**:
+
+```json
+{
+	"id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"authorizeUrl": "https://provider.example.com/oauth/authorize?...",
+	"callbackOrigin": "https://your-app.example.com"
+}
+```
+
+### OAuth 回调
+
+**端点**: `GET /api/onedrive/oauth/callback` 或 `GET /api/gdrive/oauth/callback`
+
+**认证**: ❌ 不需要
+
+**描述**:
+
+- 这是 OAuth 平台回跳用的公开端点
+- 它会消费一次性 `state`，保存授权结果，并返回一个弹窗页面
+- 弹窗页面会向主窗口发送 `cloudBackupAuthComplete` 消息，然后尝试自动关闭
+
+---
+
+## 首次设置与系统设置 API
+
+### 首次设置
+
+**端点**: `POST /api/setup`
+
+**认证**: ❌ 不需要
+
+**描述**: 初始化管理员密码，并在成功后自动登录。
+
+**请求体**:
+
+```json
+{
+	"password": "Str0ng-Pass!",
+	"confirmPassword": "Str0ng-Pass!"
+}
+```
+
+**字段说明**:
+
+- `password`: 新管理员密码
+- `confirmPassword`: 确认密码，必须与 `password` 完全一致
+- `language`: 可选，初始化时保存的语言偏好，支持 `auto`、`zh-CN`、`zh-TW`、`en`；`auto` 表示跟随浏览器语言
+
+**密码规则**:
+
+- 长度至少 8 位
+- 至少包含 1 个大写字母
+- 至少包含 1 个小写字母
+- 至少包含 1 个数字
+- 至少包含 1 个特殊字符
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "密码设置成功，已自动登录",
+	"expiresAt": "2026-05-17T10:30:00.000Z",
+	"expiresIn": "30天"
+}
+```
+
+**响应头**:
+
+```http
+Set-Cookie: auth_token=<JWT_TOKEN>; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000; Path=/
+```
+
+**错误响应**:
+
+**400 Bad Request** - 参数缺失、两次密码不一致或密码强度不足:
+
+```json
+{
+	"error": "ValidationError",
+	"message": "两次输入的密码不一致",
+	"statusCode": 400,
+	"details": {
+		"issue": "password_mismatch"
+	},
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**409 Conflict** - 已完成首次设置:
+
+```json
+{
+	"error": "ConflictError",
+	"message": "密码已设置，无法重复设置。如需修改密码，请联系管理员。",
+	"statusCode": 409,
+	"details": {
+		"operation": "first_time_setup",
+		"alreadyCompleted": true
+	},
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**500 Internal Server Error** - KV 未绑定或服务端配置异常:
+
+```json
+{
+	"error": "设置失败",
+	"message": "KV 存储未绑定，请在 Cloudflare Dashboard 或 wrangler.toml 中配置 SECRETS_KV 命名空间后重试",
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+---
+
+### 修改密码
+
+**端点**: `POST /api/change-password`
+
+**认证**: ✅ 需要
+
+**描述**: 校验当前密码后更新管理员密码。修改成功后，旧 JWT 会因签名密钥变化而失效，客户端应重新登录。
+
+**请求体**:
+
+```json
+{
+	"currentPassword": "Old-Pass1!",
+	"newPassword": "New-Pass2!",
+	"confirmPassword": "New-Pass2!"
+}
+```
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "密码修改成功，请重新登录"
+}
+```
+
+**错误响应**:
+
+**400 Bad Request** - 参数缺失、两次新密码不一致或新密码强度不足:
+
+```json
+{
+	"error": "ValidationError",
+	"message": "请提供当前密码、新密码和确认密码",
+	"statusCode": 400,
+	"details": {
+		"missing": ["confirmPassword"]
+	},
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**401 Unauthorized** - 当前密码错误:
+
+```json
+{
+	"error": "AuthenticationError",
+	"message": "密码错误",
+	"statusCode": 401,
+	"details": {
+		"operation": "change_password"
+	},
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**500 Internal Server Error** - 服务端未配置 KV 或尚未完成首次设置:
+
+```json
+{
+	"error": "ConfigurationError",
+	"message": "未设置密码，请先完成首次设置",
+	"statusCode": 500,
+	"details": {
+		"setupRequired": true
+	},
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+---
+
+### 获取系统设置
+
+**端点**: `GET /api/settings`
+
+**认证**: ✅ 需要
+
+**描述**: 获取当前系统设置。若设置不存在或已损坏，服务端会自动回退到默认值；尚未设置的语言偏好不返回 `language` 字段，以保留客户端已有的语言选择。
+
+**成功响应** (200 OK):
+
+```json
+{
+	"jwtExpiryDays": 30,
+	"maxBackups": 100,
+	"defaultExportFormat": "json"
+}
+```
+
+**字段说明**:
+
+- `jwtExpiryDays`: JWT 登录有效期，范围 `1~365`
+- `maxBackups`: 自动备份保留数量，范围 `0~1000`；`0` 表示不限制
+- `defaultExportFormat`: 默认导出格式，支持 `txt`、`json`、`csv`、`html`
+- `language`: 已保存的语言偏好，支持 `auto`、`zh-CN`、`zh-TW`、`en`。字段缺失表示尚未设置，与明确保存的 `auto` 不同
+
+**错误响应**:
+
+**500 Internal Server Error** - 读取设置失败:
+
+```json
+{
+	"error": "获取设置失败",
+	"message": "读取设置时发生错误",
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+---
+
+### 保存系统设置
+
+**端点**: `POST /api/settings`
+
+**认证**: ✅ 需要
+
+**描述**: 保存系统设置。请求体支持部分更新，未提供的字段保持原值不变。
+
+**请求体**:
+
+```json
+{
+	"jwtExpiryDays": 30,
+	"maxBackups": 100,
+	"defaultExportFormat": "html"
+}
+```
+
+**说明**:
+
+- 可只提交任意一个字段进行局部更新
+- `defaultExportFormat` 不仅影响导出按钮默认选项，也会影响新创建备份文件和远程自动备份的扩展名
+- `language` 支持 `auto`、`zh-CN`、`zh-TW`、`en`；保存其他字段不会将尚未设置的语言变为 `auto`
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "设置已保存",
+	"settings": {
+		"jwtExpiryDays": 30,
+		"maxBackups": 100,
+		"defaultExportFormat": "html"
+	}
+}
+```
+
+**错误响应**:
+
+**400 Bad Request** - 字段值非法:
+
+```json
+{
+	"error": "ValidationError",
+	"message": "默认导出格式仅支持：txt, json, csv, html",
+	"statusCode": 400,
+	"details": {
+		"field": "defaultExportFormat",
+		"value": "xml"
+	},
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**429 Too Many Requests** - 写入过于频繁:
+
+```json
+{
+	"error": "请求过于频繁",
+	"message": "您的请求过于频繁，请稍后再试",
+	"retryAfter": 30,
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
+**500 Internal Server Error** - 保存设置失败:
+
+```json
+{
+	"error": "保存设置失败",
+	"message": "保存设置时发生错误",
+	"timestamp": "2026-04-17T10:30:00.000Z"
+}
+```
+
 ---
 
 ## 认证 API
@@ -870,6 +1861,49 @@ Host: 2fa.example.com
 ### Token 刷新
 
 见 [Token 刷新](#token-刷新)
+
+### 退出登录
+
+清除当前会话的 HttpOnly 认证 Cookie。该端点无需认证（即使 Cookie 已失效仍可调用），但内置 CSRF 防护与限流。
+
+**端点**: `POST /api/logout`
+
+**鉴权**: 不需要 `auth_token` Cookie，但要求请求来自同源页面
+
+**必需请求头**:
+
+| 头部                       | 值                                   | 用途                                      |
+| -------------------------- | ------------------------------------ | ----------------------------------------- |
+| `X-Requested-With`         | `XMLHttpRequest`                     | CSRF 防护：跨站表单无法添加自定义头       |
+| `Origin`（若存在）         | 同当前 Worker 主机                   | 与 `getAllowedOrigin` 计算结果一致        |
+| `Sec-Fetch-Site`（若存在） | `same-origin` / `same-site` / `none` | 现代浏览器自动附带；`cross-site` 会被拒绝 |
+
+**请求体**: 无
+
+**成功响应** (200 OK):
+
+```json
+{
+	"success": true,
+	"message": "已退出登录"
+}
+```
+
+响应同时附带：
+
+```http
+Set-Cookie: auth_token=; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; HttpOnly; SameSite=Strict; Secure
+Cache-Control: no-store
+```
+
+**失败响应**:
+
+| 状态码 | 触发条件                                                                      | 错误标题     |
+| ------ | ----------------------------------------------------------------------------- | ------------ |
+| 403    | 缺少 `X-Requested-With` / `Origin` 与本站不一致 / `Sec-Fetch-Site=cross-site` | 请求被拒绝   |
+| 429    | 1 分钟内对同一 IP 调用超过 10 次（`sensitive` 预设）                          | 请求过于频繁 |
+
+**前端使用要点**: 即使后端返回非 200，前端仍应清理本地状态（密钥列表、OTP 定时器、`localStorage` 缓存）并跳转登录页。HttpOnly Cookie 最终会随 `SameSite=Strict` 失效或浏览器关闭而消失。
 
 ---
 
@@ -887,6 +1921,9 @@ Host: 2fa.example.com
 | **409** | Conflict              | 资源冲突（如重复添加） |
 | **429** | Too Many Requests     | 超过限流限制           |
 | **500** | Internal Server Error | 服务器内部错误         |
+| **503** | Service Unavailable   | 存储服务暂时不可用     |
+
+读写密钥的请求由 Durable Object `SECRETS_STORE` 依次处理（见 [部署指南：存储绑定](DEPLOYMENT.md#存储绑定)）。修改请求无法送达它时返回 503，`error` 为 `存储服务暂时不可用`，`message` 为 `无法确认本次修改是否已保存，请刷新后重试`：修改可能已经保存，重试前先刷新列表确认。读取请求在这种情况下改为直接读取 KV，可能暂时看到稍旧的列表。
 
 ### 错误响应格式
 
@@ -947,9 +1984,12 @@ Host: 2fa.example.com
 ```json
 {
 	"error": "请求过于频繁",
-	"message": "您的请求过于频繁，请稍后再试",
+	"message": "您的请求次数过多，请在 30 秒后重试",
 	"retryAfter": 30,
-	"timestamp": "2025-10-24T10:30:00.000Z"
+	"limit": 10,
+	"remaining": 0,
+	"resetAt": "2026-01-01T00:00:30.000Z",
+	"algorithm": "sliding-window"
 }
 ```
 
@@ -970,34 +2010,39 @@ Host: 2fa.example.com
 
 ### 限流策略
 
-所有 API 端点都有限流保护，防止滥用和 DDoS 攻击。
+当前由各处理函数显式调用限流，并未在路由入口统一限流。实际调用的规则如下：
 
-| 端点类别                            | 限流规则 | 窗口时间 | 预设名称    |
-| ----------------------------------- | -------- | -------- | ----------- |
-| **登录** (`/api/login`)             | 5 次     | 1 分钟   | `login`     |
-| **标准 API** (`/api/secrets` CRUD)  | 30 次    | 1 分钟   | `api`       |
-| **敏感操作** (删除、导出)           | 10 次    | 1 分钟   | `sensitive` |
-| **批量操作** (`/api/secrets/batch`) | 5 次     | 5 分钟   | `bulk`      |
-| **OTP 生成** (`/otp/*`)             | 100 次   | 1 分钟   | `global`    |
-| **备份管理** (`/api/backup`)        | 5 次     | 1 分钟   | -           |
-| **备份查询** (`/api/backups`)       | 30 次    | 1 分钟   | `api`       |
-| **首次设置** (`/api/setup`)         | 5 次     | 5 分钟   | `bulk`      |
+| 操作                                                       | 限流规则 | 窗口时间 | 预设名称    |
+| ---------------------------------------------------------- | -------- | -------- | ----------- |
+| 登录、首次设置                                             | 5 次     | 1 分钟   | `login`     |
+| 退出登录、修改密码、保存系统设置                           | 10 次    | 1 分钟   | `sensitive` |
+| 删除密钥、手动触发备份                                     | 10 次    | 1 分钟   | `sensitive` |
+| WebDAV/S3 保存、删除、连接测试、切换启用状态               | 10 次    | 1 分钟   | `sensitive` |
+| OneDrive/Google Drive 保存、删除、切换启用状态、启动 OAuth | 10 次    | 1 分钟   | `sensitive` |
+| 批量添加密钥 (`POST /api/secrets/batch`)                   | 20 次    | 5 分钟   | `bulk`      |
+| 批量导出密钥 (`POST /api/secrets/export`)                  | 10 次    | 1 分钟   | `sensitive` |
+
+每类操作用 `scopedRateLimitKey(操作名, IP)` 生成自己的键（如 `login:<IP>`、`settings:<IP>`、`export:<IP>`），记录在 `ratelimit:v2:<键>`，因此一类操作不会用掉另一类的配额，例如连续删除账户不会挡住登录。同一类的多个接口共用一个计数：WebDAV 的保存、删除、连接测试、切换启用状态共用 `webdav:<IP>`，S3、OneDrive、Google Drive 同理。
+
+密钥读取/新增/更新、HOTP 计数器操作、备份列表/导出/恢复、系统设置和云盘配置读取、时间校准、Token 刷新、OAuth 回调、Favicon 代理以及公开 OTP 生成，当前没有显式应用限流。`api`（30 次 / 分钟）和 `global`（100 次 / 分钟）虽然定义在预设中，但当前路由未使用这些预设。
 
 ### 限流响应头
 
-所有 API 响应都包含限流信息头：
+登录和首次设置的成功响应包含以下三个响应头。由限流器生成的 429 响应还包含 `Retry-After` 和 `X-RateLimit-Algorithm`；其他响应不保证携带限流头。
 
 ```http
-X-RateLimit-Limit: 60
-X-RateLimit-Remaining: 45
-X-RateLimit-Reset: 1729765860
+X-RateLimit-Limit: 5
+X-RateLimit-Remaining: 4
+X-RateLimit-Reset: 1767225630000
 ```
 
-| Header                  | 说明                            |
-| ----------------------- | ------------------------------- |
-| `X-RateLimit-Limit`     | 窗口时间内的最大请求数          |
-| `X-RateLimit-Remaining` | 窗口时间内剩余请求数            |
-| `X-RateLimit-Reset`     | 限流窗口重置时间（Unix 时间戳） |
+| Header                  | 说明                                                           |
+| ----------------------- | -------------------------------------------------------------- |
+| `X-RateLimit-Limit`     | 窗口时间内的最大请求数                                         |
+| `X-RateLimit-Remaining` | 窗口时间内剩余请求数                                           |
+| `X-RateLimit-Reset`     | 最早一条记录离开当前窗口的时间（Unix 毫秒时间戳）              |
+| `X-RateLimit-Algorithm` | 使用的算法，当前为 `sliding-window`；在限流器的 429 响应中返回 |
+| `Retry-After`           | 建议等待的秒数；在限流器的 429 响应中返回                      |
 
 ### 超过限流
 
@@ -1007,46 +2052,49 @@ X-RateLimit-Reset: 1729765860
 HTTP/1.1 429 Too Many Requests
 Content-Type: application/json
 Retry-After: 30
-X-RateLimit-Limit: 60
+X-RateLimit-Limit: 10
 X-RateLimit-Remaining: 0
-X-RateLimit-Reset: 1729765860
+X-RateLimit-Reset: 1767225630000
+X-RateLimit-Algorithm: sliding-window
 ```
 
 ```json
 {
 	"error": "请求过于频繁",
-	"message": "您的请求过于频繁，请稍后再试",
+	"message": "您的请求次数过多，请在 30 秒后重试",
 	"retryAfter": 30,
-	"timestamp": "2025-10-24T10:30:00.000Z"
+	"limit": 10,
+	"remaining": 0,
+	"resetAt": "2026-01-01T00:00:30.000Z",
+	"algorithm": "sliding-window"
 }
 ```
 
 ### 限流算法
 
-使用**固定窗口计数器 (Fixed Window Counter)** 算法：
+使用**滑动窗口 (Sliding Window)** 算法：
 
 ```
 时间轴: ───────────────────────────→
-         │         窗口1          │         窗口2          │
-      t=0s                    t=60s                   t=120s
-         └─────────────────────┘─────────────────────┘
-            固定 60 秒窗口         新窗口重置计数器
+         [最近 60 秒滑动窗口]
+                ↑ 当前请求时间
 
-请求计数: 每个窗口内的请求数 ≤ 最大请求数
-窗口重置: 到达窗口结束时间时，计数器重置为 0
+统计范围: 仅计算当前时刻向前回溯 windowSeconds 内的请求
+放行条件: 窗口内请求数 < maxAttempts
+窗口移动: 每次请求到来时重新计算，而不是等待整分钟重置
 ```
 
 **算法特点**:
 
-- ✅ 实现简单，性能高效
-- ✅ 内存占用低（只需存储计数和窗口结束时间）
-- ✅ 与 Cloudflare KV 存储完美适配
-- ⚠️ 窗口边界可能存在突发流量（例如在窗口结束前和新窗口开始时各发送最大请求数）
+- ✅ 相比固定窗口，更平滑地限制突发流量
+- ✅ 降低窗口边界瞬时双倍突发的问题
+- ✅ 当前实现基于 Cloudflare KV 持久化限流状态
+- ✅ 所有预设均统一使用 `sliding-window`
 
 **实现说明**:
 
 - 基于 Cloudflare KV 存储限流状态
-- 使用客户端 IP 地址作为限流键（来自 `CF-Connecting-IP` header）
+- 客户端 IP 优先取 `CF-Connecting-IP`，其次为 `X-Real-IP`、`X-Forwarded-For` 的首项；缺失时使用 `unknown`。限流键为 `操作名:IP`，每类操作单独计数
 - KV 自动过期机制确保窗口状态自动清理
 - 限流检查失败时采用 "fail open" 策略（允许请求通过，不影响正常用户）
 
@@ -1066,8 +2114,7 @@ const loginResponse = await fetch('https://2fa.example.com/api/login', {
 		'Content-Type': 'application/json',
 	},
 	body: JSON.stringify({
-		username: 'admin',
-		password: 'YOUR_PASSWORD',
+		credential: 'YOUR_PASSWORD',
 	}),
 	credentials: 'include', // 重要：携带 Cookie
 });
@@ -1112,21 +2159,10 @@ if (response.ok) {
 #### 生成 OTP
 
 ```javascript
-const response = await fetch('https://2fa.example.com/api/generate-otp', {
-	method: 'POST',
-	headers: {
-		'Content-Type': 'application/json',
-	},
-	credentials: 'include',
-	body: JSON.stringify({
-		secret: 'JBSWY3DPEHPK3PXP',
-		type: 'totp',
-	}),
-});
+const response = await fetch('https://2fa.example.com/otp/JBSWY3DPEHPK3PXP?type=totp&period=30&format=json');
 
 const result = await response.json();
-console.log('当前 OTP:', result.otp);
-console.log('剩余时间:', result.timeRemaining, '秒');
+console.log('当前 OTP:', result.token);
 ```
 
 ### cURL
@@ -1136,7 +2172,7 @@ console.log('剩余时间:', result.timeRemaining, '秒');
 ```bash
 curl -X POST https://2fa.example.com/api/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"YOUR_PASSWORD"}' \
+  -d '{"credential":"YOUR_PASSWORD"}' \
   -c cookies.txt  # 保存 Cookie
 ```
 
@@ -1163,7 +2199,15 @@ curl -X POST https://2fa.example.com/api/secrets \
 #### 生成 OTP（无需认证）
 
 ```bash
-curl https://2fa.example.com/otp/JBSWY3DPEHPK3PXP
+curl "https://2fa.example.com/otp/JBSWY3DPEHPK3PXP?format=json"
+```
+
+#### 回滚到 1.8.0 之前的版本前压实 HOTP 计数器
+
+```bash
+curl -X POST https://2fa.example.com/api/secrets/counters/compact \
+  -H "X-Confirm-Maintenance: compact-hotp-counters" \
+  -b cookies.txt
 ```
 
 ### Python
@@ -1176,8 +2220,7 @@ session = requests.Session()
 login_response = session.post(
     'https://2fa.example.com/api/login',
     json={
-        'username': 'admin',
-        'password': 'YOUR_PASSWORD'
+        'credential': 'YOUR_PASSWORD'
     }
 )
 
@@ -1205,31 +2248,12 @@ if login_response.ok:
 
 ---
 
-## Webhook 集成（计划中）
-
-> **状态**: 🚧 计划中，尚未实现
-
-未来版本将支持 Webhook 集成，用于：
-
-- 密钥添加/删除通知
-- 备份完成通知
-- 异常登录警报
-
----
-
-## GraphQL API（计划中）
-
-> **状态**: 🚧 计划中，尚未实现
-
-未来版本可能提供 GraphQL 端点，提供更灵活的数据查询。
-
----
-
 ## 相关文档
 
 - [架构文档](ARCHITECTURE.md) - 了解系统设计
 - [部署指南](DEPLOYMENT.md) - 部署和配置
-- [功能文档](features/) - 各功能详解
+- [文档中心](README.md) - 功能与开发文档索引
+- [云盘备份配置](CLOUD_DRIVE_SETUP.md) - OneDrive 和 Google Drive OAuth 配置
 
 ---
 

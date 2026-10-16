@@ -33,120 +33,6 @@ export function getBaseStyles() {
       position: relative;
     }
 
-    /* ========== 固定悬浮按钮组 ========== */
-    /* 回到顶部按钮 */
-    .back-to-top {
-      position: fixed;
-      bottom: 24px; /* 最底部 */
-      right: 24px;
-      width: 48px;
-      height: 48px;
-      background: var(--back-to-top-bg);
-      border: 2px solid var(--back-to-top-border);
-      border-radius: 50%;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
-      box-shadow: var(--shadow-md);
-      z-index: 1000;
-      opacity: 0;
-      visibility: hidden;
-      -webkit-tap-highlight-color: transparent;
-      -webkit-touch-callout: none;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      -ms-user-select: none;
-      outline: none;
-      padding: 0;
-      font-family: inherit;
-    }
-
-    .back-to-top:focus-visible {
-      outline: 2px solid var(--border-focus);
-      outline-offset: 2px;
-    }
-
-    .back-to-top.show {
-      opacity: 1;
-      visibility: visible;
-    }
-
-    .back-to-top:hover {
-      box-shadow: var(--shadow-lg);
-      background: var(--back-to-top-hover);
-    }
-
-    .back-to-top:active {
-      transform: translateY(0) scale(0.98);
-    }
-
-    .back-to-top-icon {
-      font-size: 22px;
-      font-weight: bold;
-      line-height: 1;
-      transition: transform 0.3s ease;
-      color: var(--back-to-top-text);
-    }
-
-    /* 主题切换按钮 */
-    .theme-toggle-float {
-      position: fixed;
-      bottom: 24px; /* 默认在最底部（返回顶部不显示时）*/
-      right: 24px;
-      width: 48px;
-      height: 48px;
-      background: var(--theme-toggle-bg);
-      border: 2px solid var(--theme-toggle-border);
-      border-radius: 50%;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      user-select: none;
-      box-shadow: var(--shadow-md);
-      z-index: 1000;
-      -webkit-tap-highlight-color: transparent;
-      -webkit-touch-callout: none;
-      -webkit-user-select: none;
-      -moz-user-select: none;
-      -ms-user-select: none;
-      outline: none;
-      padding: 0;
-      font-family: inherit;
-    }
-
-    .theme-toggle-float:focus-visible {
-      outline: 2px solid var(--border-focus);
-      outline-offset: 2px;
-    }
-
-    /* 当返回顶部按钮显示时，主题按钮上移 */
-    .back-to-top.show ~ .theme-toggle-float {
-      bottom: 72px !important; /* 缩小间距到48px */
-    }
-
-    .theme-toggle-float:hover {
-      box-shadow: var(--shadow-lg);
-      background: var(--theme-toggle-hover);
-    }
-
-    .theme-toggle-float:active {
-      transform: translateY(0) scale(0.98);
-    }
-
-    .theme-toggle-float .theme-icon {
-      font-size: 20px;
-      transition: transform 0.3s ease;
-    }
-
-    .theme-toggle-float:hover .theme-icon {
-      transform: rotate(20deg);
-    }
-
     .header h1 {
       font-size: 28px;
       font-weight: 600;
@@ -257,6 +143,18 @@ export function getBaseStyles() {
       text-align: left;
     }
 
+    .search-stats:empty {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     /* 平板和中等屏幕优化 */
     @media (min-width: 481px) and (max-width: 768px) {
       .search-action-row {
@@ -307,12 +205,206 @@ export function getBaseStyles() {
       box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
     }
 
-    /* 独立的操作菜单容器 - 固定在右上角 */
+    /* ========== P1.2 排序 popover（搜索右侧 icon-button） ========== */
+    .sort-select-hidden {
+      display: none !important;
+    }
+
+    .sort-dropdown {
+      position: relative;
+      display: inline-block;
+    }
+
+    .sort-trigger {
+      list-style: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 14px;
+      border: 2px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      background: var(--input-bg-focus);
+      color: var(--text-primary);
+      font-size: 14px;
+      height: 46px;
+      box-sizing: border-box;
+      transition: all 0.2s ease;
+      user-select: none;
+    }
+
+    .sort-trigger::-webkit-details-marker { display: none; }
+    .sort-trigger::marker { content: ''; }
+
+    .sort-trigger:hover {
+      border-color: var(--border-focus);
+    }
+
+    .sort-dropdown[open] > .sort-trigger {
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+    }
+
+    .sort-trigger svg {
+      flex-shrink: 0;
+    }
+
+    .sort-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 0;
+      min-width: 232px;
+      background: var(--menu-bg, var(--card-bg));
+      border: 1px solid var(--menu-border, var(--border-primary));
+      border-radius: 10px;
+      box-shadow: var(--menu-shadow, 0 8px 24px rgba(0,0,0,0.15));
+      padding: 6px;
+      z-index: 1002;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      /* JS narrows this to the actual space above or below the trigger. */
+      max-height: calc(100vh - 12px);
+      max-height: calc(100dvh - 12px);
+      overflow-y: auto;
+    }
+
+    .sort-menu.opens-upward {
+      top: auto;
+      bottom: calc(100% + 6px);
+    }
+
+    .sort-menu-section {
+      min-width: 0;
+    }
+
+    .sort-menu-label {
+      padding: 6px 8px 5px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.2;
+    }
+
+    .view-mode-segmented {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      background: var(--bg-secondary);
+    }
+
+    .view-mode-option,
+    .group-sort-option {
+      min-width: 0;
+      min-height: 36px;
+      padding: 7px 8px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--segmented-option-text, var(--text-secondary));
+      font: inherit;
+      font-size: 13px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .view-mode-option:hover,
+    .group-sort-option:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .view-mode-option.active,
+    .group-sort-option.active {
+      background: var(--card-bg);
+      color: var(--text-primary);
+      font-weight: 600;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    }
+
+    .view-mode-option:focus-visible,
+    .group-sort-option:focus-visible,
+    .sort-option:focus-visible {
+      outline: 2px solid var(--border-focus);
+      outline-offset: 1px;
+    }
+
+    .sort-menu-divider {
+      height: 1px;
+      margin: 6px 2px 3px;
+      background: var(--border-primary);
+    }
+
+    .sort-options {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .sort-option {
+      padding: 10px 14px;
+      text-align: left;
+      background: transparent;
+      border: none;
+      font-size: 14px;
+      color: var(--text-primary);
+      cursor: pointer;
+      border-radius: 6px;
+      white-space: nowrap;
+      transition: background 0.15s;
+      font-family: inherit;
+    }
+
+    .sort-option:hover {
+      background: var(--bg-hover);
+    }
+
+    .sort-option.active {
+      background: var(--bg-hover);
+      font-weight: 600;
+    }
+
+    .sort-option.active::before {
+      content: '✓';
+      color: var(--success, #10b981);
+      margin-right: 6px;
+      font-weight: bold;
+    }
+
+    /* 手机端：隐藏 trigger 文字，保留 icon，压缩为 44x44 icon-button */
+    @media (max-width: 768px) {
+      .sort-trigger-label {
+        display: none;
+      }
+      .sort-trigger {
+        padding: 0;
+        width: 44px;
+        min-width: 44px;
+        height: 44px;
+        justify-content: center;
+      }
+
+      .view-mode-option,
+      .group-sort-option {
+        min-height: 44px;
+      }
+    }
+
+    /* 独立的操作菜单容器 - 固定在右下角，兼容 iOS safe area */
     .action-menu-float {
       position: fixed;
-      top: 24px;
-      right: 24px;
+      bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+      right: calc(24px + env(safe-area-inset-right, 0px));
       z-index: 1001;
+    }
+
+    /* 拖拽中：禁用过渡，避免位置跟手时出现回弹 */
+    .action-menu-float.dragging,
+    .action-menu-float.dragging .main-action-button {
+      transition: none !important;
     }
 
     .main-action-button {
@@ -323,7 +415,7 @@ export function getBaseStyles() {
       height: 48px;
       border-radius: 50%;
       font-size: 20px;
-      cursor: pointer;
+      cursor: grab;
       transition: all 0.3s ease;
       display: flex;
       align-items: center;
@@ -336,6 +428,47 @@ export function getBaseStyles() {
       -ms-user-select: none;
       user-select: none;
       outline: none;
+      touch-action: none;
+      animation: fab-breath 4s ease-in-out infinite;
+    }
+
+    /* 轻微的呼吸灯效果：紫色光晕缓慢明暗 */
+    @keyframes fab-breath {
+      0%, 100% {
+        box-shadow:
+          var(--action-btn-shadow),
+          0 0 0 0 rgba(142, 68, 173, 0);
+      }
+      50% {
+        box-shadow:
+          var(--action-btn-shadow),
+          0 0 14px 3px rgba(142, 68, 173, 0.85);
+      }
+    }
+
+    /* 激活 / 拖拽时暂停呼吸，避免与其他状态视觉冲突 */
+    .main-action-button.active,
+    .action-menu-float.dragging .main-action-button {
+      animation: none;
+    }
+
+    /* 悬停暂停仅在支持 hover 的设备启用：
+       触摸设备点按后 :hover 会粘滞在按钮上，若不加保护呼吸灯将一直停到用户点击别处 */
+    @media (hover: hover) {
+      .main-action-button:hover {
+        animation: none;
+      }
+    }
+
+    /* 尊重系统的"减弱动效"无障碍偏好 */
+    @media (prefers-reduced-motion: reduce) {
+      .main-action-button {
+        animation: none;
+      }
+    }
+
+    .action-menu-float.dragging .main-action-button {
+      cursor: grabbing;
     }
 
     .main-action-button:hover {
@@ -356,10 +489,10 @@ export function getBaseStyles() {
       background: var(--danger-dark);
     }
 
-    /* 优化后的子菜单设计 */
+    /* 优化后的子菜单设计 - FAB 在右下角，子菜单向上展开 */
     .action-submenu {
       position: absolute;
-      top: 70px;
+      bottom: 70px;
       right: 0;
       background: var(--menu-bg);
       border-radius: 12px;
@@ -367,7 +500,7 @@ export function getBaseStyles() {
       border: 1px solid var(--menu-border);
       opacity: 0;
       visibility: hidden;
-      transform: translateY(-8px);
+      transform: translateY(8px);
       transition:
         opacity 0.2s ease,
         visibility 0.2s ease,
@@ -468,27 +601,27 @@ export function getBaseStyles() {
       visibility: visible;
     }
 
-    /* 响应式调整 */
+    /* 响应式调整 — P1.2：搜索与排序 icon-button 同行展示 */
     @media (max-width: 768px) {
       .search-action-row {
-        flex-direction: column;
-        gap: 12px;
-        align-items: stretch;
+        flex-direction: row;
+        gap: 8px;
+        align-items: center;
       }
 
       .search-input-wrapper {
-        width: 100%;
+        flex: 1;
+        min-width: 0;
       }
 
       .sort-controls {
-        width: 100%;
+        flex: 0 0 auto;
+        width: auto;
       }
 
-      .sort-select {
-        width: 100%;
-        padding: 10px 12px;
-        font-size: 14px;
-        height: 44px;
+      /* menu 在手机上贴右对齐，不超过屏幕宽度 */
+      .sort-menu {
+        max-width: calc(100vw - 32px);
       }
     }
 
@@ -527,35 +660,8 @@ export function getBaseStyles() {
       }
 
       .action-menu-float {
-        top: 16px;
-        right: 16px;
-      }
-
-      .back-to-top {
-        width: 40px;
-        height: 40px;
-        right: 16px;
-        bottom: 16px;
-      }
-
-      .back-to-top-icon {
-        font-size: 18px;
-      }
-
-      /* 当返回顶部按钮显示时，主题按钮上移 */
-      .back-to-top.show ~ .theme-toggle-float {
-        bottom: 64px !important;
-      }
-
-      .theme-toggle-float {
-        width: 40px;
-        height: 40px;
-        right: 16px;
-        bottom: 16px;
-      }
-
-      .theme-toggle-icon {
-        font-size: 18px;
+        bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+        right: calc(16px + env(safe-area-inset-right, 0px));
       }
 
       .main-action-button {
@@ -573,7 +679,7 @@ export function getBaseStyles() {
 
       .action-submenu {
         min-width: 160px;
-        top: 52px;
+        bottom: 52px;
       }
 
       .submenu-item {
@@ -620,35 +726,8 @@ export function getBaseStyles() {
       }
 
       .action-menu-float {
-        top: 12px;
-        right: 12px;
-      }
-
-      .back-to-top {
-        width: 36px;
-        height: 36px;
-        right: 12px;
-        bottom: 12px;
-      }
-
-      .back-to-top-icon {
-        font-size: 16px;
-      }
-
-      /* 当返回顶部按钮显示时，主题按钮上移 */
-      .back-to-top.show ~ .theme-toggle-float {
-        bottom: 56px !important;
-      }
-
-      .theme-toggle-float {
-        width: 36px;
-        height: 36px;
-        right: 12px;
-        bottom: 12px;
-      }
-
-      .theme-toggle-icon {
-        font-size: 16px;
+        bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+        right: calc(12px + env(safe-area-inset-right, 0px));
       }
 
       .main-action-button {
@@ -666,7 +745,7 @@ export function getBaseStyles() {
 
       .action-submenu {
         min-width: 140px;
-        top: 48px;
+        bottom: 48px;
       }
     }
 

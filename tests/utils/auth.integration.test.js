@@ -16,6 +16,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   verifyAuth,
   handleLogin,
+  handleLogout,
   handleRefreshToken,
   checkIfSetupRequired,
   handleFirstTimeSetup,
@@ -35,7 +36,9 @@ class MockKV {
 
   async get(key, type = 'text') {
     const value = this.store.get(key);
-    if (!value) return null;
+    if (!value) {
+      return null;
+    }
 
     if (type === 'json') {
       try {
@@ -128,31 +131,13 @@ function createMockEnv(kvStore = null) {
 }
 
 /**
- * 从 Response 中提取 Cookie
- */
-function extractCookie(response, cookieName) {
-  const setCookieHeader = response.headers.get('Set-Cookie');
-  if (!setCookieHeader) return null;
-
-  const cookies = setCookieHeader.split(', ').map(c => c.trim());
-  for (const cookie of cookies) {
-    const [nameValue] = cookie.split(';');
-    const [name, value] = nameValue.split('=');
-    if (name === cookieName) {
-      return value;
-    }
-  }
-  return null;
-}
-
-/**
  * 从 Response 中提取 JSON body
  */
 async function getResponseJson(response) {
   const text = await response.text();
   try {
     return JSON.parse(text);
-  } catch (error) {
+  } catch {
     return null;
   }
 }
@@ -374,6 +359,32 @@ describe('Auth.js Integration Tests', () => {
         }
       }
     });
+
+    it('其他受限操作不占用登录配额', async () => {
+      const clientIP = '127.0.0.2';
+
+      // 退出登录的上限是 10 次/分钟，用满它
+      for (let i = 0; i < 10; i++) {
+        const logoutResponse = await handleLogout(createMockRequest({
+          method: 'POST',
+          pathname: '/api/logout',
+          headers: {
+            'CF-Connecting-IP': clientIP,
+            'X-Requested-With': 'XMLHttpRequest',
+            'Sec-Fetch-Site': 'same-origin'
+          }
+        }), env);
+        expect(logoutResponse.status).toBe(200);
+      }
+
+      const loginResponse = await handleLogin(createMockRequest({
+        method: 'POST',
+        pathname: '/api/login',
+        body: { credential: testPassword },
+        headers: { 'CF-Connecting-IP': clientIP }
+      }), env);
+      expect(loginResponse.status).toBe(200);
+    });
   });
 
   describe('认证中间件集成 (verifyAuth)', () => {
@@ -401,7 +412,6 @@ describe('Auth.js Integration Tests', () => {
         body: { credential: testPassword }
       });
       const loginResponse = await handleLogin(loginRequest, env);
-      const loginData = await getResponseJson(loginResponse);
       // 从 Cookie 头提取 token
       const setCookieHeader = loginResponse.headers.get('Set-Cookie');
       const tokenMatch = setCookieHeader?.match(/auth_token=([^;]+)/);
@@ -498,7 +508,6 @@ describe('Auth.js Integration Tests', () => {
         body: { credential: testPassword }
       });
       const loginResponse = await handleLogin(loginRequest, env);
-      const loginData = await getResponseJson(loginResponse);
       // 从 Cookie 头提取 token
       const setCookieHeader = loginResponse.headers.get('Set-Cookie');
       const tokenMatch = setCookieHeader?.match(/auth_token=([^;]+)/);
@@ -588,11 +597,64 @@ describe('Auth.js Integration Tests', () => {
     });
   });
 
+  describe('退出登录流程集成', () => {
+    it('同源退出请求应该清除认证 Cookie', async () => {
+      const request = createMockRequest({
+        method: 'POST',
+        pathname: '/api/logout',
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'Sec-Fetch-Site': 'same-origin'
+        }
+      });
+      const env = createMockEnv();
+
+      const response = await handleLogout(request, env);
+      const data = await getResponseJson(response);
+
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
+      expect(response.headers.get('Set-Cookie')).toContain('auth_token=');
+      expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+    });
+
+    it('缺少同源 AJAX 标记的退出请求应该被拒绝', async () => {
+      const request = createMockRequest({
+        method: 'POST',
+        pathname: '/api/logout'
+      });
+      const env = createMockEnv();
+
+      const response = await handleLogout(request, env);
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get('Set-Cookie')).toBeNull();
+    });
+
+    it('未配置 KV 时仍应允许退出登录（限流降级为放行）', async () => {
+      const request = createMockRequest({
+        method: 'POST',
+        pathname: '/api/logout',
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'Sec-Fetch-Site': 'same-origin'
+        }
+      });
+
+      // env 未传 / SECRETS_KV 未绑定时，限流应跳过而不是抛错
+      const response = await handleLogout(request, {});
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Set-Cookie')).toContain('Max-Age=0');
+    });
+  });
+
   describe('路由认证集成 (requiresAuth)', () => {
     it('应该正确识别公开路由', () => {
       const publicRoutes = [
         '/',
         '/api/login',
+        '/api/logout',
         '/api/refresh-token',
         '/api/setup',
         '/setup',
@@ -694,7 +756,6 @@ describe('Auth.js Integration Tests', () => {
       const loginResponse = await handleLogin(loginRequest, env);
       expect(loginResponse.status).toBe(200);
 
-      const loginData = await getResponseJson(loginResponse);
       const setCookieHeader = loginResponse.headers.get('Set-Cookie');
       const tokenMatch = setCookieHeader?.match(/auth_token=([^;]+)/);
       const token = tokenMatch ? tokenMatch[1] : null;
@@ -770,7 +831,7 @@ describe('Auth.js Integration Tests', () => {
       // Step 3: 清空 rate limit 计数器（模拟时间过去）
       // 清理两个版本的 rate limit 数据（固定窗口和滑动窗口）
       await kvStore.delete(`ratelimit:${clientIP}`);      // v1 固定窗口
-      await kvStore.delete(`ratelimit:v2:${clientIP}`);   // v2 滑动窗口
+      await kvStore.delete(`ratelimit:v2:login:${clientIP}`);   // v2 滑动窗口（登录单独计数）
 
       // Step 4: 使用正确密码登录
       const successRequest = createMockRequest({
@@ -811,7 +872,7 @@ describe('Auth.js Integration Tests', () => {
       let isSetupRequired;
       try {
         isSetupRequired = await checkIfSetupRequired(mockEnv);
-      } catch (error) {
+      } catch {
         // 如果抛出错误，这也是可以接受的行为
         isSetupRequired = true;
       }

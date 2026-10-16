@@ -5,14 +5,19 @@
  * - handleBatchAddSecrets: 批量导入密钥（带 Rate Limiting）
  */
 
-import { saveSecretsToKV } from './shared.js';
-import { decryptSecrets } from '../../utils/encryption.js';
+import { saveSecretsToKV, getAllSecrets } from './shared.js';
 import { getLogger } from '../../utils/logger.js';
 import { validateRequest, batchImportSchema, addSecretSchema, checkDuplicateSecret } from '../../utils/validation.js';
 import { createJsonResponse, createErrorResponse } from '../../utils/response.js';
-import { checkRateLimit, getClientIdentifier, createRateLimitResponse, RATE_LIMIT_PRESETS } from '../../utils/rateLimit.js';
+import {
+	checkRateLimit,
+	scopedRateLimitKey,
+	getClientIdentifier,
+	createRateLimitResponse,
+	RATE_LIMIT_PRESETS,
+} from '../../utils/rateLimit.js';
 import { ValidationError, StorageError, CryptoError, ConfigurationError, errorToResponse, logError } from '../../utils/errors.js';
-import { KV_KEYS } from '../../utils/constants.js';
+import { LIMITS } from '../../utils/constants.js';
 
 /**
  * 批量添加密钥 (带 Rate Limiting)
@@ -36,7 +41,7 @@ export async function handleBatchAddSecrets(request, env, ctx) {
 	try {
 		// 🛡️ Rate Limiting: 防止批量操作滥用
 		const clientIP = getClientIdentifier(request, 'ip');
-		const rateLimitInfo = await checkRateLimit(clientIP, env, RATE_LIMIT_PRESETS.bulk);
+		const rateLimitInfo = await checkRateLimit(scopedRateLimitKey('batch-import', clientIP), env, RATE_LIMIT_PRESETS.bulk);
 
 		if (!rateLimitInfo.allowed) {
 			logger.warn('批量添加速率限制超出', {
@@ -44,7 +49,7 @@ export async function handleBatchAddSecrets(request, env, ctx) {
 				limit: rateLimitInfo.limit,
 				resetAt: rateLimitInfo.resetAt,
 			});
-			return createRateLimitResponse(rateLimitInfo);
+			return createRateLimitResponse(rateLimitInfo, request);
 		}
 
 		// 🔍 使用验证中间件解析和验证请求（仅验证顶层结构）
@@ -53,11 +58,20 @@ export async function handleBatchAddSecrets(request, env, ctx) {
 			return data;
 		} // 验证失败
 
-		const { secrets } = data;
+		const { secrets, immediateBackup, chunkIndex, chunkCount } = data;
+		// 只有"满片 + 非末片 + 存在后续片"才被承认为中间片，用来跳过即时备份。
+		// 满片尺寸来自 LIMITS.BULK_IMPORT_CHUNK_SIZE，前端分片和本校验都以它为准，
+		// 防止客户端通过小尺寸 + 伪造 chunkCount 绕过事件驱动备份。
+		const isIntermediateChunk =
+			Number.isInteger(chunkIndex) &&
+			Number.isInteger(chunkCount) &&
+			chunkCount > 1 &&
+			chunkIndex >= 1 &&
+			chunkIndex < chunkCount &&
+			secrets.length === LIMITS.BULK_IMPORT_CHUNK_SIZE;
 
-		// 从KV存储获取现有密钥列表（可能是加密的）
-		const existingSecretsData = await env.SECRETS_KV.get(KV_KEYS.SECRETS, 'text');
-		const existingSecrets = await decryptSecrets(existingSecretsData, env);
+		// 获取包含HOTP sidecar有效计数器的现有密钥列表
+		const existingSecrets = await getAllSecrets(env);
 
 		const results = [];
 		let successCount = 0;
@@ -125,13 +139,20 @@ export async function handleBatchAddSecrets(request, env, ctx) {
 		}
 
 		// 一次性保存所有密钥到KV存储（自动排序）
-		// 🔄 触发事件驱动备份（批量导入使用 immediate: true 强制立即备份）
-		await saveSecretsToKV(env, existingSecrets, 'batch-import', { immediate: true }, ctx);
+		// 🔄 事件驱动备份策略：
+		//   - 中间片 (isIntermediateChunk)：skipBackup 生效，event 备份被跳过，靠末片或 cron 兜底
+		//   - 非中间片：始终同步备份（immediate: true），保持历史契约——批量导入返回前备份已落盘
+		//     immediateBackup 客户端标志目前仅用于驱动前端分片的最后一片判定，服务端不单独使用
+		await saveSecretsToKV(env, existingSecrets, 'batch-import', { immediate: !isIntermediateChunk, skipBackup: isIntermediateChunk }, ctx);
 
 		logger.info('✅ 批量导入完成', {
 			successCount,
 			failCount,
 			totalCount: secrets.length,
+			immediateBackup: immediateBackup === true,
+			chunkIndex: Number.isInteger(chunkIndex) ? chunkIndex : null,
+			chunkCount: Number.isInteger(chunkCount) ? chunkCount : null,
+			isIntermediateChunk,
 		});
 
 		return createJsonResponse(
